@@ -32,7 +32,7 @@ if tickerDfToday.empty:
     df2 = {'Open': ['No data found'], 'Close': ['No data found'], 'High': ['No data found'], 'Low': ['No data found'], 'Volume': ['No data found'], 'Dividends': ['No data found']}
     tickerDfToday = df2
     
-st.text(tickerDfToday)
+# st.text(tickerDfToday)
 
 st.write("""
 ### """ + symbols[result.index(tickerSymbol)] + """
