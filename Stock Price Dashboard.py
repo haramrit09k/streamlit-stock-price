@@ -16,7 +16,8 @@ d1 = today.strftime("%A, %B %d, %Y") # YYYY-mm-dd
 
 st.write("""
 # Stock Price Dashboard
-## { by haramrit singh khurana }
+## [{ by haramrit singh khurana }](https://haramrit09k.github.io)
+
 """)
 
 # tickerSymbol = "GOOGL"
