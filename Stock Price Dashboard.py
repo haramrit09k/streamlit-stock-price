@@ -15,7 +15,7 @@ today = date.today()
 d1 = today.strftime("%A, %B %d, %Y") # YYYY-mm-dd
 
 st.write("""
-# Stock Price Dashboard
+# :chart_with_upwards_trend: Stock Price Dashboard
 ## [{ by haramrit singh khurana }](https://haramrit09k.github.io)
 
 """)
