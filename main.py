@@ -15,7 +15,7 @@ today = date.today()
 d1 = today.strftime("%A, %B %d, %Y") # YYYY-mm-dd
 
 st.write("""
-# Simple Stock Price App
+# Stock Price Dashboard
 ## { by haramrit singh khurana }
 """)
 
