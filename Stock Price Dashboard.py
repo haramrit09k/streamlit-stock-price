@@ -446,6 +446,11 @@ def money(value, unit_prefix=''):
     return f"{sign}{unit_prefix}${value:,.0f}"
 
 
+def dollars(value):
+    """-7.42 -> '-$7.42'"""
+    return f"{'-' if value < 0 else ''}${abs(value):,.2f}"
+
+
 def financials_view():
     try:
         cik = sec_ciks().get(company['Symbol'])
@@ -472,16 +477,24 @@ def financials_view():
         cols[1].metric("Net income", money(last['Net income']),
                        None if pd.isna(margin) else f"{margin:.1f}% of revenue", delta_color='off', help=HELP['net_income'])
     if 'Diluted EPS' in table and pd.notna(last['Diluted EPS']):
-        cols[2].metric("Earnings per share", f"${last['Diluted EPS']:,.2f}", help=HELP['eps'])
+        cols[2].metric("Earnings per share", dollars(last['Diluted EPS']), help=HELP['eps'])
 
     chart_columns = [c for c in ('Revenue', 'Net income') if c in table]
     if chart_columns:
         big = table[chart_columns].abs().max().max() >= 1e9
         divisor, unit = (1e9, 'B') if big else (1e6, 'M')
         st.subheader("Year by year")
-        chart = (table[chart_columns] / divisor).rename(columns=lambda c: f"{c} (${unit})")
-        chart.index = chart.index.strftime('%Y')
-        st.bar_chart(chart, stack=False)
+        bars = (table[chart_columns] / divisor).rename_axis('Year').reset_index().melt(
+            'Year', var_name='Line', value_name='Amount')
+        bars['Year'] = bars['Year'].dt.strftime('%Y')
+        st.altair_chart(alt.Chart(bars).mark_bar().encode(
+            x=alt.X('Year:N', title=None, axis=alt.Axis(labelAngle=0)),
+            xOffset='Line:N',
+            y=alt.Y('Amount:Q', title=f"US$ {'billions' if big else 'millions'}"),
+            color=alt.Color('Line:N', title=None, scale=alt.Scale(domain=['Revenue', 'Net income'],
+                                                                 range=['#8ec5ff', '#0068c9'])),
+            tooltip=['Year:N', 'Line:N', alt.Tooltip('Amount:Q', format=',.1f', title=f"US${unit}")],
+        ))
 
     with st.expander("All the figures, and what each line means"):
         shown = table.rename_axis('Fiscal year end')
@@ -491,7 +504,7 @@ def financials_view():
             if column in ('Net margin', 'Revenue growth'):
                 formatted[column] = shown[column].map(lambda v: '' if pd.isna(v) else f"{v:+.1f}%" if column == 'Revenue growth' else f"{v:.1f}%")
             elif column == 'Diluted EPS':
-                formatted[column] = shown[column].map(lambda v: '' if pd.isna(v) else f"${v:,.2f}")
+                formatted[column] = shown[column].map(lambda v: '' if pd.isna(v) else dollars(v))
             else:
                 formatted[column] = shown[column].map(lambda v: '' if pd.isna(v) else money(v))
         st.dataframe(formatted.T)
