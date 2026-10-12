@@ -31,7 +31,7 @@ Everything below is optional; the app runs without any of it. Set them where the
 | --- | --- |
 | `SEC_USER_AGENT` | Turns on the **Financials** view. The SEC requires every program to identify itself, so use a project name and a monitored contact address, e.g. `Stock Price Dashboard you@example.com`. Use an address made for the project rather than a personal one. |
 | `ANTHROPIC_API_KEY` | Turns on the AI summary in the **News** view. Without it, or when the limits below are reached, the app shows a hand-written example instead. |
-| `AI_MODEL` | Model used for the summaries. Default `claude-haiku-5-5` (about 0.06 cents per summary). `claude-sonnet-5-5` (about 1 cent) or `claude-opus-5-5` (about 2 cents) are stronger; try them if the summaries stray beyond the headlines. Estimates, not measurements. |
+| `AI_MODEL` | Model used for the summaries. Default `claude-haiku-5-5`; `claude-sonnet-5-5` and `claude-opus-5-5` are stronger. Measured on a live Sonnet call with 8 headlines: 1,364 input and 516 output tokens. At the published prices that is about $0.0004 on Haiku, $0.008 on Sonnet and $0.016 on Opus per fresh summary (assuming similar token counts across models; the log's `AI summary ok … tokens in=… out=…` line shows the real numbers for yours). Repeat clicks on the same headlines are cached and free. |
 | `AI_DAILY_LIMIT` | Most fresh AI summaries per day for the whole app (default `100`). Results are cached per set of headlines, so repeat clicks don't count. Also set a spend limit in your Anthropic console. |
 | `AI_SESSION_LIMIT` | Most summaries one visitor can request per visit (default `3`). |
 
