@@ -1,4 +1,5 @@
 import datetime as dt
+import os
 import re
 
 import yfinance as yf
@@ -6,6 +7,7 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 
+import ai
 import sec
 
 st.set_page_config(page_title="Stock Price Dashboard", page_icon="📈", layout="centered")
@@ -446,6 +448,47 @@ def money(value, unit_prefix=''):
     return f"{sign}{unit_prefix}${value:,.0f}"
 
 
+def _int_env(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+AI_SESSION_LIMIT = _int_env('AI_SESSION_LIMIT', 3)  # summaries one visitor can ask for per visit
+AI_MESSAGES = {'budget': "The daily limit for AI summaries has been reached.",
+               'refused': "The AI couldn't summarise these headlines.",
+               'too_long': "The AI summary didn't finish.",
+               'bad_output': "The AI summary came back in an unusable form.",
+               'error': "The AI summary isn't available right now."}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def ai_summary(symbol, name, headlines):
+    """Cached per set of headlines, so repeat clicks (by anyone) cost nothing. Failures raise and are not cached."""
+    return ai.summarise(symbol, name, list(headlines))
+
+
+def show_ai_summary(result, items):
+    def cites(numbers):
+        links = [f"[{n}]({items[n - 1]['link']})" if items[n - 1].get('link', '').startswith('https://') else str(n)
+                 for n in numbers]
+        return f" ({', '.join(links)})"
+
+    bull, bear = st.columns(2)
+    for column, title, key in ((bull, "🐂 What bulls are saying", 'bull'), (bear, "🐻 What bears are saying", 'bear')):
+        with column.container(border=True):
+            st.markdown(f"**{title}**")
+            if not result[key]:
+                st.markdown(":gray[The headlines don't make a clear case for this side.]")
+            for point in result[key]:
+                st.markdown(f"- {md_escape(point['point'])}{cites(point['headlines'])}")
+    if result['unclear']:
+        st.markdown(f"**What the headlines don't tell us:** {md_escape(result['unclear'])}")
+    st.caption("Written by an AI from the headlines above only, so it can miss context or be wrong. It describes "
+               "arguments; it is not advice. The numbers in brackets link to the headlines it used.")
+
+
 def dollars(value):
     """-7.42 -> '-$7.42'"""
     return f"{'-' if value < 0 else ''}${abs(value):,.2f}"
@@ -543,27 +586,56 @@ def news_view():
         st.info(f"No recent headlines found for {company['Symbol']}.")
         return
 
-    for item in items:
+    for number, item in enumerate(items, 1):
         title = md_escape(item['title'])
         link = item.get('link', '')
         headline = f"[{title}]({link})" if link.startswith('https://') else title
-        # headline and its source line in one block, so they read as a single item
-        st.markdown(f"{headline}  \n:gray[{md_escape(item.get('publisher', 'Unknown source'))} · "
+        # headline and its source line in one block, so they read as a single item; numbered so summaries can cite them
+        st.markdown(f"{number}. {headline}  \n:gray[{md_escape(item.get('publisher', 'Unknown source'))} · "
                     f"{time_ago(item['providerPublishTime'])} · {news_kind(item)[0]}]")
 
+    # optional AI summary of what each side is saying, only when a key is configured and someone asks for it
+    shown_ai, ai_note = False, None
+    if ai.configured():
+        st.subheader("What bulls and bears are saying")
+        st.caption("An AI reads the headlines above and sums up the arguments each side could make, citing the "
+                   "headlines it used. It sees only these headlines, so it can't know more than they say.")
+        headlines = tuple((i['title'], i.get('publisher', '')) for i in items)
+        saved_key = f"ai_{company['Symbol']}"
+        if st.button("Summarise the headlines", key=f"ai_button_{company['Symbol']}"):
+            if st.session_state.get('ai_used', 0) >= AI_SESSION_LIMIT:
+                ai_note = "You've used all the AI summaries for this visit."
+            else:
+                st.session_state['ai_used'] = st.session_state.get('ai_used', 0) + 1
+                try:
+                    with st.spinner("Reading the headlines..."):
+                        st.session_state[saved_key] = {'headlines': headlines,
+                                                       'result': ai_summary(company['Symbol'], company['Company Name'], headlines)}
+                except ai.AiUnavailable as unavailable:
+                    ai_note = AI_MESSAGES.get(unavailable.reason, AI_MESSAGES['error'])
+        saved = st.session_state.get(saved_key)
+        if ai_note:
+            st.info(ai_note if saved and saved['headlines'] == headlines else
+                    f"{ai_note} Here is a hand-written example of reading a headline both ways instead.")
+        if saved and saved['headlines'] == headlines:
+            show_ai_summary(saved['result'], items)
+            shown_ai = True
+
     st.subheader("Read it both ways")
-    st.markdown("The same headline can support opposite conclusions. Here is an illustration with a made-up company:")
-    with st.container(border=True):
-        st.markdown("**Acme Corp beats earnings estimates but lowers its full-year outlook**")
-        bull, bear = st.columns(2)
-        bull.markdown("**🐂 A positive reading**\n\nResults beat expectations, so the business is doing well "
-                      "right now. Companies sometimes set a cautious outlook so they can beat it later. If the "
-                      "price had already fallen, the bad news may already be reflected in it.")
-        bear.markdown("**🐻 A negative reading**\n\nManagement knows the business better than anyone, so a lower "
-                      "outlook suggests slower sales or rising costs ahead. This quarter may be as good as it "
-                      "gets, and markets tend to care more about the future than the past.")
-    st.caption("Neither reading is \"right\". What helps is the questions: how far below expectations is the new "
-               "outlook, is the cause a one-off or lasting, and how did the price react?")
+    st.markdown("The same headline can support opposite conclusions." +
+                ("" if shown_ai else " Here is an illustration with a made-up company:"))
+    with st.expander("Example with a made-up company", expanded=not shown_ai):
+        with st.container(border=True):
+            st.markdown("**Acme Corp beats earnings estimates but lowers its full-year outlook**")
+            bull, bear = st.columns(2)
+            bull.markdown("**🐂 A positive reading**\n\nResults beat expectations, so the business is doing well "
+                          "right now. Companies sometimes set a cautious outlook so they can beat it later. If the "
+                          "price had already fallen, the bad news may already be reflected in it.")
+            bear.markdown("**🐻 A negative reading**\n\nManagement knows the business better than anyone, so a lower "
+                          "outlook suggests slower sales or rising costs ahead. This quarter may be as good as it "
+                          "gets, and markets tend to care more about the future than the past.")
+        st.caption("Neither reading is \"right\". What helps is the questions: how far below expectations is the new "
+                   "outlook, is the cause a one-off or lasting, and how did the price react?")
 
     st.subheader("Try it on a real headline")
     pick = st.selectbox("Pick a headline", range(len(items)), key=f"news_pick_{company['Symbol']}",
