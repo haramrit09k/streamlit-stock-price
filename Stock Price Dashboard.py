@@ -25,10 +25,21 @@ tickers = load_tickers()
 st.title("📈 Stock Price Dashboard")
 st.caption("by [haramrit singh khurana](https://haramrit09k.github.io)")
 
-labels = tickers['Label'].to_list()
-default = labels.index('AAPL - Apple Inc.') if 'AAPL - Apple Inc.' in labels else 0
-choice = st.selectbox('Select company', labels, index=default)
+label_of = dict(zip(tickers['Symbol'], tickers['Label']))
+labels = list(label_of.values())
+
+# Pick the starting company and range from the URL (?symbol=AAPL&range=1Y) so views can be shared.
+# Only set once per session, so later widget changes are not overwritten.
+if 'company' not in st.session_state:
+    st.session_state.company = label_of.get(st.query_params.get('symbol'), label_of.get('AAPL', labels[0]))
+if 'range' not in st.session_state:
+    r = st.query_params.get('range')
+    st.session_state.range = r if r in RANGES else '1Y'
+
+choice = st.selectbox('Select company', labels, key='company')
 company = tickers[tickers['Label'] == choice].iloc[0]
+# keep the URL in sync with the selection so it can be copied and shared
+st.query_params['symbol'] = company['Symbol']
 
 history = load_history(company['Symbol'])
 
@@ -59,8 +70,9 @@ col5.metric("Volume", f"{latest['Volume']:,.0f}")
 col6.metric("Dividends", f"${latest['Dividends']:,.2f}")
 
 # one price chart with a time range, instead of one chart per column
-range_choice = st.radio("Range", list(RANGES), index=2, horizontal=True)
+range_choice = st.radio("Range", list(RANGES), horizontal=True, key='range')
 days = RANGES[range_choice]
+st.query_params['range'] = range_choice
 view = history if days is None else history[history.index >= history.index[-1] - pd.Timedelta(days=days)]
 
 st.subheader("Closing price (USD)")
