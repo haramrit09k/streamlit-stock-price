@@ -1,3 +1,6 @@
+import datetime as dt
+import re
+
 import yfinance as yf
 import streamlit as st
 import pandas as pd
@@ -6,7 +9,7 @@ import altair as alt
 st.set_page_config(page_title="Stock Price Dashboard", page_icon="📈", layout="centered")
 
 RANGES = {"1M": 30, "6M": 182, "1Y": 365, "5Y": 365 * 5, "Max": None}
-VIEWS = ["Price", "Learn"]
+VIEWS = ["Price", "News", "Learn"]
 RANGE_WORDS = {"1M": "the last month", "6M": "the last 6 months", "1Y": "the last year",
                "5Y": "the last 5 years", "Max": "its full history"}
 
@@ -40,6 +43,54 @@ HELP = {
     "compare": "Overlay a second company or fund. Comparing helps separate a company's own performance from "
                "the market's: try SPY, an ETF that tracks the S&P 500 (about 500 large US companies).",
 }
+
+# Kinds of news, matched in order against the headline. Each: label, pattern, what it is, questions people ask.
+NEWS_KINDS = [
+    ("Analyst opinion",
+     r"\b(price target|upgrades?|downgrades?|analysts?|rating|initiates|maintains|reiterates"
+     r"|outperform|underperform)\b",
+     "An analyst's view, not a fact. Analysts often disagree, and targets are often revised after the price has "
+     "already moved.",
+     ["Is the target above or below today's price, and by how much?",
+      "Has this analyst changed their view, or just repeated it?",
+      "Did the price already move before the note came out?"]),
+    ("Earnings & results",
+     r"\b(earnings|quarterly|q[1-4]|guidance|outlook|results)\b",
+     "Companies report their results every three months. Prices often move on whether the results beat or miss "
+     "what analysts expected, not on the results alone.",
+     ["Did the results beat or miss what was expected?",
+      "What does the company say about the next quarter or year (its \"guidance\")?",
+      "Is any gain a one-off, or does it look repeatable?"]),
+    ("Deal or partnership",
+     r"\b(acquires?|acquired|acquisition|merger|buyout|takeover|stake|partnership)\b",
+     "A company buying, selling, investing in or partnering with another. The announced benefits are the "
+     "company's own account of it.",
+     ["How big is the deal compared with the company?",
+      "Is it paid for with cash, new shares or debt?",
+      "Does it need approval from regulators, and could it fall through?"]),
+    ("Legal & regulatory",
+     r"\b(lawsuit|sues?|sued|probe|investigation|antitrust|fines?|fined|regulators?|ruling|settlement)\b",
+     "Legal and regulatory events can take years to play out, and early headlines often change as facts emerge.",
+     ["How large could the cost be compared with the company's size?",
+      "Is it a one-off, or part of a pattern?",
+      "How far along is it: an allegation, a ruling, or a settlement?"]),
+    ("Leadership",
+     r"\b(steps? down|stepping (?:down|aside)|resign\w*|appoint\w*|successor|transition|names? new (?:ceo|cfo))\b",
+     "A change in who runs the company. Planned handovers and sudden exits tend to mean different things.",
+     ["Was it planned, or sudden?",
+      "Who takes over, and what is their track record?",
+      "What reason did the company give?"]),
+]
+ROUNDUP = ("Market roundup",
+           "Mentions many companies at once, so this one may be a small part of the story.",
+           ["How much of it is actually about this company?",
+            "Is it reporting something that happened, or listing ideas?"])
+OTHER_NEWS = ("General news", "News that doesn't fit a common type.",
+              ["What exactly happened, and what is just commentary?"])
+ANY_NEWS_QUESTIONS = ["Is this new information, or already widely known?",
+                      "Is it a fact (something happened) or an opinion (someone thinks)?",
+                      "How big is it compared with the whole company?",
+                      "Does it change the company's future, or only today's mood?"]
 
 
 @st.cache_data
@@ -80,6 +131,58 @@ def change_text(series, symbol=None):
     pct = (series.iloc[-1] / series.iloc[0] - 1) * 100
     colour = 'green' if pct >= 0 else 'red'
     return f"{symbol + ' ' if symbol else ''}:{colour}[{pct:+,.1f}%]"
+
+
+class NoNews(Exception):
+    pass
+
+
+@st.cache_data(ttl=900)
+def _download_news(symbol):
+    items = yf.Search(symbol, news_count=20).news
+    # keep headlines that mention this company, newest first
+    items = sorted((n for n in items if symbol in (n.get('relatedTickers') or [])),
+                   key=lambda n: n['providerPublishTime'], reverse=True)
+    if not items:
+        raise NoNews(symbol)  # raising keeps an empty or failed reply out of the cache
+    return items[:8]
+
+
+def load_news(symbol):
+    """Recent headlines; an empty list if there are none; None if Yahoo could not be reached."""
+    try:
+        return _download_news(symbol)
+    except NoNews:
+        return []
+    except Exception:
+        return None
+
+
+def md_escape(text):
+    """Headlines are untrusted text: stop them turning into markdown or math."""
+    return re.sub(r"([\\`*_{}\[\]()#+!|$<>~])", r"\\\1", text)
+
+
+def time_ago(timestamp):
+    then = dt.datetime.fromtimestamp(timestamp, dt.timezone.utc)
+    minutes = int((dt.datetime.now(dt.timezone.utc) - then).total_seconds() // 60)
+    if minutes < 60:
+        return f"{max(minutes, 1)}m ago"
+    if minutes < 24 * 60:
+        return f"{minutes // 60}h ago"
+    if minutes < 7 * 24 * 60:
+        return f"{minutes // (24 * 60)}d ago"
+    return then.strftime('%b %d')
+
+
+def news_kind(item):
+    """(label, what it is, questions) for a headline."""
+    if len(item.get('relatedTickers') or []) >= 4:
+        return ROUNDUP
+    for label, pattern, what, questions in NEWS_KINDS:
+        if re.search(pattern, item['title'], re.IGNORECASE):
+            return label, what, questions
+    return OTHER_NEWS
 
 
 def compact(n):
@@ -307,6 +410,51 @@ def price_view():
     st.bar_chart(window['Volume'])
 
 
+def news_view():
+    st.caption(f"Recent headlines that mention {company['Symbol']}, from Yahoo Finance. A headline is a "
+               "starting point, not a conclusion.")
+    items = load_news(company['Symbol'])
+    if items is None:
+        st.error("Couldn't load headlines from Yahoo Finance right now. Please try again in a minute.")
+        return
+    if not items:
+        st.info(f"No recent headlines found for {company['Symbol']}.")
+        return
+
+    for item in items:
+        title = md_escape(item['title'])
+        link = item.get('link', '')
+        headline = f"[{title}]({link})" if link.startswith('https://') else title
+        # headline and its source line in one block, so they read as a single item
+        st.markdown(f"{headline}  \n:gray[{md_escape(item.get('publisher', 'Unknown source'))} · "
+                    f"{time_ago(item['providerPublishTime'])} · {news_kind(item)[0]}]")
+
+    st.subheader("Read it both ways")
+    st.markdown("The same headline can support opposite conclusions. Here is an illustration with a made-up company:")
+    with st.container(border=True):
+        st.markdown("**Acme Corp beats earnings estimates but lowers its full-year outlook**")
+        bull, bear = st.columns(2)
+        bull.markdown("**🐂 A positive reading**\n\nResults beat expectations, so the business is doing well "
+                      "right now. Companies sometimes set a cautious outlook so they can beat it later. If the "
+                      "price had already fallen, the bad news may already be reflected in it.")
+        bear.markdown("**🐻 A negative reading**\n\nManagement knows the business better than anyone, so a lower "
+                      "outlook suggests slower sales or rising costs ahead. This quarter may be as good as it "
+                      "gets, and markets tend to care more about the future than the past.")
+    st.caption("Neither reading is \"right\". What helps is the questions: how far below expectations is the new "
+               "outlook, is the cause a one-off or lasting, and how did the price react?")
+
+    st.subheader("Try it on a real headline")
+    pick = st.selectbox("Pick a headline", range(len(items)), key=f"news_pick_{company['Symbol']}",
+                        format_func=lambda i: items[i]['title'][:100])
+    label, what, questions = news_kind(items[pick])
+    with st.container(border=True):
+        st.markdown(f"**Topic (guessed from the wording): {label}.** {md_escape(what)}")
+        st.markdown("**Questions people ask about this topic:**\n" + "\n".join(f"- {q}" for q in questions))
+        st.markdown("**Questions for any headline:**\n" + "\n".join(f"- {q}" for q in ANY_NEWS_QUESTIONS))
+    st.caption("Try writing down one reason someone could read it positively and one negatively, and what "
+               "would change your mind. There is no single right answer.")
+
+
 def learn_view():
     st.caption("Short explainers that use the company you're looking at. They describe how things work; "
                "they are not recommendations to buy or sell anything.")
@@ -326,6 +474,57 @@ def learn_view():
   in the S&P 500, and trades like a single stock.
 - **What a price chart can't tell you:** whether a company is well run or fairly priced. That takes things like
   earnings, debt and news. Past performance does not predict future results.
+""")
+
+    st.subheader("Reading company reports")
+    st.markdown("Companies publish far more than a share price. These guides cover the main documents and what "
+                "to look at first.")
+    if company['Type'] == 'Stock':
+        st.markdown(f"See {company['Symbol']}'s real filings on "
+                    f"[SEC EDGAR](https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany"
+                    f"&CIK={company['Symbol']}&owner=include&count=40), the SEC's free public database. "
+                    "Companies based outside the US usually file different forms (such as a 20-F in place of "
+                    "a 10-K).")
+    else:
+        st.markdown(f"{company['Symbol']} is an ETF. ETFs publish different documents from companies, mainly a "
+                    "prospectus and regular fund reports, so the guides below apply to the companies it holds.")
+    with st.expander("The annual report (10-K)"):
+        st.markdown("""
+Filed once a year with the SEC by US-listed companies, and audited. Four parts are worth knowing:
+- **Business:** what the company does and how it makes money. Start here.
+- **Risk Factors:** what could go wrong, in the company's own words. Much of it is standard wording, so the
+  useful part is what is *new* compared with last year.
+- **Management's Discussion (MD&A):** management explaining *why* the numbers changed. Often the most readable part.
+- **Financial Statements and notes:** the numbers themselves (see below) and the fine print on debt and unusual items.
+""")
+    with st.expander("The quarterly report (10-Q) and the 8-K"):
+        st.markdown("""
+- **10-Q:** a shorter, unaudited update filed after each of the first three quarters. It uses the same
+  statements as the 10-K. Compare a quarter with the *same quarter last year*, because many businesses have
+  busy and quiet seasons.
+- **8-K:** a short notice filed within days of an important event, such as results, a new CEO, or an acquisition.
+  Results are usually attached as a press release.
+""")
+    with st.expander("The three financial statements"):
+        st.markdown("""
+- **Income statement:** what happened *over a period*. Sales (revenue), minus costs, leaves profit (net income).
+  Look at whether sales and profit are growing, and whether profit is growing as fast as sales.
+- **Balance sheet:** a snapshot of one day. What the company owns (assets) and what it owes (liabilities); the
+  difference is the owners' share. Look at how much debt there is compared with cash.
+- **Cash flow statement:** the cash that actually moved in and out. A company can report a profit and still run
+  short of cash, which is why this statement is read alongside the income statement.
+""")
+    with st.expander("The earnings call"):
+        st.markdown("""
+After each quarter's results, management usually hosts a call for analysts. Recordings or transcripts are
+normally on the company's investor-relations website.
+- **Prepared remarks** come first: polished, and management's own account of the quarter.
+- **The Q&A** follows, and is less scripted. Many people pay most attention to what analysts keep asking about,
+  and to which questions get a direct answer.
+- **Things listeners watch:** any change to guidance, which measures management talks about more or less than
+  before, and how this call compares with the last one.
+
+A call is a source of information, not an independent check: management is presenting its own view.
 """)
 
     st.subheader("How people make decisions")
@@ -372,6 +571,8 @@ of them show mixed results.
 price can still fall.
 
 **Limits:** by the time news is public, much of it may already be reflected in the price.
+
+The **News** view has live headlines and an example of reading one both ways.
 """)
     with risk:
         st.markdown("**How much could go wrong?** Many people treat this as important as what to hold. "
@@ -411,6 +612,8 @@ finds that consistently beating the market is hard, especially after costs.
 
 if view == 'Price':
     price_view()
+elif view == 'News':
+    news_view()
 else:
     learn_view()
 
