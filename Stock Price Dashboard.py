@@ -35,6 +35,8 @@ if 'company' not in st.session_state:
 if 'range' not in st.session_state:
     r = st.query_params.get('range')
     st.session_state.range = r if r in RANGES else '1Y'
+if 'compare' not in st.session_state:
+    st.session_state.compare = label_of.get(st.query_params.get('compare'))
 
 choice = st.selectbox('Select company', labels, key='company')
 company = tickers[tickers['Label'] == choice].iloc[0]
@@ -75,16 +77,58 @@ days = RANGES[range_choice]
 st.query_params['range'] = range_choice
 view = history if days is None else history[history.index >= history.index[-1] - pd.Timedelta(days=days)]
 
-st.subheader("Closing price (USD)")
-# let the y-axis fit the data instead of starting at 0, so price moves are visible
-price_chart = alt.Chart(view['Close'].reset_index()).mark_line().encode(
-    x=alt.X('Date:T', title=None),
-    y=alt.Y('Close:Q', scale=alt.Scale(zero=False), title=None),
-    tooltip=[alt.Tooltip('Date:T'), alt.Tooltip('Close:Q', format='$.2f')],
-)
-st.altair_chart(price_chart)
+compare_choice = st.selectbox('Compare with (optional)', labels, index=None, key='compare',
+                              placeholder='Type a symbol or company name')
 
-st.subheader("Volume")
+# optional second company, drawn on the same chart
+other = None
+if compare_choice:
+    other = tickers[tickers['Label'] == compare_choice].iloc[0]
+    if other['Symbol'] == company['Symbol']:
+        st.info("Pick a different company to compare.")
+        other = None
+    else:
+        other_history = load_history(other['Symbol'])
+        if other_history.empty:
+            st.warning(f"No price data found for {other['Symbol']}, so it can't be compared.")
+            other = None
+
+if other is not None:
+    # rebase both to 100 at the start so growth is comparable, using only the days both traded
+    closes = pd.concat({company['Symbol']: history['Close'], other['Symbol']: other_history['Close']}, axis=1)
+    closes.index = closes.index.tz_localize(None)
+    closes = closes.dropna()
+    if days is not None:
+        closes = closes[closes.index >= closes.index[-1] - pd.Timedelta(days=days)]
+    st.query_params['compare'] = other['Symbol']
+else:
+    st.query_params.pop('compare', None)
+
+if other is not None and closes.empty:
+    st.warning("These two companies have no trading days in common.")
+elif other is not None:
+    st.subheader(f"Growth of 100: {company['Symbol']} vs {other['Symbol']}")
+    st.caption(f"Both rebased to 100 on {closes.index[0].strftime('%B %d, %Y')}")
+    growth = (closes / closes.iloc[0] * 100).rename_axis('Date').reset_index().melt(
+        'Date', var_name='Symbol', value_name='Value')
+    growth_chart = alt.Chart(growth).mark_line().encode(
+        x=alt.X('Date:T', title=None),
+        y=alt.Y('Value:Q', scale=alt.Scale(zero=False), title=None),
+        color=alt.Color('Symbol:N', title=None),
+        tooltip=[alt.Tooltip('Date:T'), 'Symbol:N', alt.Tooltip('Value:Q', format='.1f')],
+    )
+    st.altair_chart(growth_chart)
+else:
+    st.subheader("Closing price (USD)")
+    # let the y-axis fit the data instead of starting at 0, so price moves are visible
+    price_chart = alt.Chart(view['Close'].reset_index()).mark_line().encode(
+        x=alt.X('Date:T', title=None),
+        y=alt.Y('Close:Q', scale=alt.Scale(zero=False), title=None),
+        tooltip=[alt.Tooltip('Date:T'), alt.Tooltip('Close:Q', format='$.2f')],
+    )
+    st.altair_chart(price_chart)
+
+st.subheader(f"{company['Symbol']} volume")
 st.bar_chart(view['Volume'])
 
 with st.expander("Company details"):
