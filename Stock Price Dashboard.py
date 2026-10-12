@@ -6,10 +6,13 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 
+import sec
+
 st.set_page_config(page_title="Stock Price Dashboard", page_icon="📈", layout="centered")
 
 RANGES = {"1M": 30, "6M": 182, "1Y": 365, "5Y": 365 * 5, "Max": None}
-VIEWS = ["Price", "News", "Learn"]
+# The Financials view needs the SEC_USER_AGENT environment variable (see sec.py); without it the view is hidden.
+VIEWS = ["Price", "News", "Financials", "Learn"] if sec.configured() else ["Price", "News", "Learn"]
 RANGE_WORDS = {"1M": "the last month", "6M": "the last 6 months", "1Y": "the last year",
                "5Y": "the last 5 years", "Max": "its full history"}
 
@@ -40,6 +43,14 @@ HELP = {
     "typical": "The average size of the daily price change in this range, whether up or down.",
     "growth": "Both lines start at 100 on the same day, so you can compare how much each grew regardless of "
               "its share price. See the Learn view for more.",
+    "revenue": "Everything the company sold during the year, before any costs are taken out. Also called sales.",
+    "net_income": "What is left after all costs, interest and taxes: the company's profit for the year. "
+                  "A negative number is a loss.",
+    "eps": "Diluted earnings per share: net income divided by the number of shares, counting shares that could "
+           "be created from options and similar. It is the profit \"per share\".",
+    "margin": "Net income as a percentage of revenue: how much of each dollar of sales the company kept as profit.",
+    "cash_flow": "Cash the business generated from its operations. It can differ from profit, for example when "
+                 "customers pay late.",
     "compare": "Overlay a second company or fund. Comparing helps separate a company's own performance from "
                "the market's: try SPY, an ETF that tracks the S&P 500 (about 500 large US companies).",
 }
@@ -410,6 +421,104 @@ def price_view():
     st.bar_chart(window['Volume'])
 
 
+@st.cache_data(ttl=86400)
+def sec_ciks():
+    return sec.ticker_map()
+
+
+@st.cache_data(ttl=6 * 3600)
+def sec_financials(cik):
+    return sec.annual_financials(cik)  # None (cached) means the SEC has no data; failures raise and are not cached
+
+
+@st.cache_data(ttl=3600)
+def sec_filings(cik):
+    return sec.recent_filings(cik)
+
+
+def money(value, unit_prefix=''):
+    """391040000000 -> '$391.0B'"""
+    sign = '-' if value < 0 else ''
+    value = abs(value)
+    for suffix, size in (('B', 1e9), ('M', 1e6), ('K', 1e3)):
+        if value >= size:
+            return f"{sign}{unit_prefix}${value / size:,.1f}{suffix}"
+    return f"{sign}{unit_prefix}${value:,.0f}"
+
+
+def financials_view():
+    try:
+        cik = sec_ciks().get(company['Symbol'])
+        table = sec_financials(cik) if cik else None
+    except Exception:
+        st.error("Couldn't load data from the SEC right now. Please try again in a minute.")
+        return
+    if table is None:
+        st.info(f"The SEC's financial data isn't available for {company['Symbol']}. Funds such as ETFs, and many "
+                "companies based outside the US, file different reports.")
+        return
+
+    st.caption(f"Figures from the annual reports (10-K) that {company['Company Name']} files with the SEC, in US "
+               "dollars. They are shown as reported, without adjustment.")
+    last = table.iloc[-1]
+    st.markdown(f"**Fiscal year ended {table.index[-1].strftime('%B %d, %Y')}**")
+    cols = st.columns(3)
+    if 'Revenue' in table:
+        growth = last.get('Revenue growth')
+        cols[0].metric("Revenue", money(last['Revenue']), None if pd.isna(growth) else f"{growth:+.1f}% vs year before",
+                       help=HELP['revenue'])
+    if 'Net income' in table:
+        margin = last.get('Net margin')
+        cols[1].metric("Net income", money(last['Net income']),
+                       None if pd.isna(margin) else f"{margin:.1f}% of revenue", delta_color='off', help=HELP['net_income'])
+    if 'Diluted EPS' in table and pd.notna(last['Diluted EPS']):
+        cols[2].metric("Earnings per share", f"${last['Diluted EPS']:,.2f}", help=HELP['eps'])
+
+    chart_columns = [c for c in ('Revenue', 'Net income') if c in table]
+    if chart_columns:
+        big = table[chart_columns].abs().max().max() >= 1e9
+        divisor, unit = (1e9, 'B') if big else (1e6, 'M')
+        st.subheader("Year by year")
+        chart = (table[chart_columns] / divisor).rename(columns=lambda c: f"{c} (${unit})")
+        chart.index = chart.index.strftime('%Y')
+        st.bar_chart(chart, stack=False)
+
+    with st.expander("All the figures, and what each line means"):
+        shown = table.rename_axis('Fiscal year end')
+        shown.index = shown.index.strftime('%b %d, %Y')
+        formatted = pd.DataFrame(index=shown.index)
+        for column in shown:
+            if column in ('Net margin', 'Revenue growth'):
+                formatted[column] = shown[column].map(lambda v: '' if pd.isna(v) else f"{v:+.1f}%" if column == 'Revenue growth' else f"{v:.1f}%")
+            elif column == 'Diluted EPS':
+                formatted[column] = shown[column].map(lambda v: '' if pd.isna(v) else f"${v:,.2f}")
+            else:
+                formatted[column] = shown[column].map(lambda v: '' if pd.isna(v) else money(v))
+        st.dataframe(formatted.T)
+        st.markdown(f"""
+- **Revenue:** {HELP['revenue']}
+- **Net income:** {HELP['net_income']}
+- **Diluted EPS:** {HELP['eps']}
+- **Operating cash flow:** {HELP['cash_flow']}
+- **Net margin:** {HELP['margin']}
+- **Revenue growth:** how much revenue changed compared with the year before.
+""")
+
+    st.subheader("Recent filings")
+    try:
+        filings = sec_filings(cik)
+    except Exception:
+        filings = []
+        st.caption("Couldn't load the list of filings right now.")
+    for item in filings:
+        about = f" · about {item['about']}" if item['about'] else ''
+        st.markdown(f"[{item['form']} · {item['label']}]({item['url']})  \n"
+                    f":gray[Filed {pd.Timestamp(item['date']).strftime('%b %d, %Y')}{about}]")
+    st.markdown(f"[All of {company['Symbol']}'s filings on SEC EDGAR](https://www.sec.gov/cgi-bin/browse-edgar?"
+                f"action=getcompany&CIK={cik}&owner=include&count=40)")
+    st.caption("Open a filing to read the original. The Learn view explains what each part means.")
+
+
 def news_view():
     st.caption(f"Recent headlines that mention {company['Symbol']}, from Yahoo Finance. A headline is a "
                "starting point, not a conclusion.")
@@ -479,6 +588,8 @@ def learn_view():
     st.subheader("Reading company reports")
     st.markdown("Companies publish far more than a share price. These guides cover the main documents and what "
                 "to look at first.")
+    if 'Financials' in VIEWS:
+        st.markdown("The **Financials** view shows this company's real figures and its latest filings.")
     if company['Type'] == 'Stock':
         st.markdown(f"See {company['Symbol']}'s real filings on "
                     f"[SEC EDGAR](https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany"
@@ -614,6 +725,8 @@ if view == 'Price':
     price_view()
 elif view == 'News':
     news_view()
+elif view == 'Financials':
+    financials_view()
 else:
     learn_view()
 
