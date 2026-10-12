@@ -280,3 +280,37 @@ def test_an_account_with_no_credit_is_called_out_as_such_not_as_a_model_problem(
             ai.summarise("ACME", "Acme", HEADLINES, client=FakeClient(error=error))
     assert "out of credit" in caplog.text and "Plans & Billing" in caplog.text
     assert "check AI_MODEL" not in caplog.text
+
+
+def test_prompt_forbids_inventing_roles_and_background():
+    assert "Never describe anyone as an analyst, investor, expert, economist or strategist" in ai.SYSTEM
+    assert "only when the headline names them" in ai.SYSTEM
+    assert "Do not add background" in ai.SYSTEM
+
+
+def test_invented_roles_are_detected_only_when_no_headline_uses_the_word():
+    headlines = [("Says Gene Munster: Starlink phone is a bigger problem", "Benzinga"),
+                 ("Wall Street analysts split on Acme", "Wire")]
+    result = {"bull": [{"point": "An analyst suggests the LG deal helps.", "headlines": [1]}],
+              "bear": [{"point": "An investor says Musk could make a phone. Economists agree.", "headlines": [1]}], "unclear": ""}
+    assert ai.unsupported_roles(result, headlines) == ["economist", "investor"]   # 'analyst' is in headline 2
+
+
+def test_no_role_words_means_nothing_is_flagged():
+    result = {"bull": [{"point": "Gene Munster says a phone is coming.", "headlines": [1]}], "bear": [], "unclear": ""}
+    assert ai.unsupported_roles(result, HEADLINES) == []
+
+
+def test_an_invented_role_is_logged_but_the_summary_is_not_edited(caplog):
+    text = reply(bull=[{"point": "A strategist suggests results beat estimates.", "headlines": [1]}])
+    with caplog.at_level("WARNING", logger="stockdash.ai"):
+        out = ai.summarise("ACME", "Acme", HEADLINES, client=FakeClient(text))   # no headline uses the word 'strategist'
+    assert "strategist" in caplog.text and "forbids" in caplog.text
+    assert out["bull"][0]["point"] == "A strategist suggests results beat estimates."   # shown as the model wrote it
+
+
+def test_a_role_word_that_a_headline_uses_is_not_flagged(caplog):
+    text = reply(bull=[{"point": "An analyst raised the price target.", "headlines": [2]}])   # headline 2 says 'Analyst'
+    with caplog.at_level("WARNING", logger="stockdash.ai"):
+        ai.summarise("ACME", "Acme", HEADLINES, client=FakeClient(text))
+    assert "role the headlines don't use" not in caplog.text

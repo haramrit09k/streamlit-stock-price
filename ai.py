@@ -54,7 +54,8 @@ Rules:
 - Every argument must cite the numbers of the headlines it rests on, in "headlines". Never cite a number that is not in the list.
 - If the headlines do not support an argument for a side, return fewer arguments, or an empty list. Do not pad.
 - Write plainly for someone new to investing: one or two short sentences per argument.
-- Say whose view it is when a headline makes that clear (for example "an analyst", "the company"), and word opinions and predictions as opinions, not facts.
+- Say whose view it is only when the headline names them: a person, a company, or the outlet shown in brackets after the headline. Never describe anyone as an analyst, investor, expert, economist or strategist unless the headline itself uses that word for them; otherwise just use the name, or say "a headline". Do not add background about who someone is or what a company does: if a point needs context the headlines don't give, say the headlines don't say.
+- Word opinions and predictions as opinions, not facts.
 - Describe arguments only. Do not recommend buying, selling or holding, do not predict the price, and do not say what the reader should do."""
 
 _lock = threading.Lock()
@@ -159,6 +160,17 @@ def clean(result, count):
             "unclear": str(result.get("unclear") or "").strip()[:300]}
 
 
+ROLE_WORDS = re.compile(r"\b(analyst|investor|expert|economist|strategist)s?\b", re.IGNORECASE)
+
+
+def unsupported_roles(result, headlines):
+    """Role words (analyst, investor, ...) that appear in the summary but in none of the headlines. The prompt
+    forbids inventing a role; this only measures how well that is followed (it is logged, not edited out)."""
+    source = " ".join(f"{title} {publisher}" for title, publisher in headlines).lower()
+    used = {m.group(1).lower() for side in ("bull", "bear") for point in result[side] for m in ROLE_WORDS.finditer(point["point"])}
+    return sorted(word for word in used if not re.search(rf"\b{word}s?\b", source))
+
+
 def summarise(symbol, name, headlines, client=None):
     """Returns {"bull": [...], "bear": [...], "unclear": str}. Raises AiUnavailable. Every outcome is logged."""
     global fresh_calls
@@ -202,6 +214,10 @@ def summarise(symbol, name, headlines, client=None):
     except (StopIteration, ValueError, AttributeError, TypeError) as error:
         log.warning("AI summary came back unusable for %s (model=%s): %s", symbol, ascii(use_model), type(error).__name__)
         raise AiUnavailable("bad_output") from error
+    invented = unsupported_roles(result, headlines)
+    if invented:
+        log.warning("AI summary for %s names a role the headlines don't use (%s); the prompt forbids this",
+                    symbol, ", ".join(invented))
     usage = getattr(response, "usage", None)
     given = sum(len(raw.get(side) or []) for side in ("bull", "bear") if isinstance(raw, dict) and isinstance(raw.get(side), list))
     kept = len(result["bull"]) + len(result["bear"])
