@@ -185,9 +185,9 @@ def summarise(symbol, name, headlines, client=None):
     except Exception as error:  # includes missing package, bad key, wrong model name, rate limit, network
         # Visitors only ever see a generic message; the details go to the log (with anything key-like removed).
         status = getattr(error, "status_code", None)
+        detail = scrub(getattr(error, "message", None) or error)[:300]
         log.warning("AI summary FAILED for %s (model=%s): %s, HTTP status %s: %s%s", symbol, ascii(use_model),
-                    type(error).__name__, status if status else "n/a",
-                    scrub(getattr(error, "message", None) or error)[:300], _hint(status))
+                    type(error).__name__, status if status else "n/a", detail, _hint(status, detail))
         raise AiUnavailable("error") from error
     if response.stop_reason == "refusal":
         log.warning("AI summary refused by the model for %s (model=%s)", symbol, ascii(use_model))
@@ -211,8 +211,12 @@ def summarise(symbol, name, headlines, client=None):
     return result
 
 
-def _hint(status):
-    """What to check for the common HTTP failures."""
-    return {400: " | check AI_MODEL and the request", 401: " | the API key was rejected: check ANTHROPIC_API_KEY",
+def _hint(status, message=""):
+    """What to check for the common failures. The text matters as well as the status: an account with no credit
+    is reported as an invalid request (400), which must not send anyone looking at the model name."""
+    text = str(message).lower()
+    if "credit balance" in text or "plans & billing" in text or "billing" in text:
+        return " | the account is out of credit: add credit under Plans & Billing in the Anthropic console"
+    return {400: " | the request was rejected: check AI_MODEL", 401: " | the API key was rejected: check ANTHROPIC_API_KEY",
             403: " | the key isn't allowed to use this model or feature", 404: " | the model name wasn't found: check AI_MODEL",
-            429: " | rate limited or out of credit: check usage and billing in the Anthropic console"}.get(status, "")
+            429: " | rate limited: slow down, or check usage limits in the Anthropic console"}.get(status, "")

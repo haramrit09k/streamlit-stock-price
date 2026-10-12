@@ -56,7 +56,8 @@ address. Lines start with `INFO` or `WARNING`; a `WARNING` means something faile
 | `AI summary: served AAPL from the cache` | Someone clicked again for the same headlines: no model call, no cost. |
 | `AI summary FAILED … HTTP status 404 … check AI_MODEL` | The model name wasn't found: fix `AI_MODEL`. |
 | `AI summary FAILED … HTTP status 401 … check ANTHROPIC_API_KEY` | The key was rejected: re-create it and re-set it. |
-| `AI summary FAILED … HTTP status 429 … check usage and billing` | Rate limited or out of credit. |
+| `AI summary FAILED … out of credit … Plans & Billing` | The Anthropic account has no credit (the API reports this as an invalid request, HTTP 400). Add credit in the console. |
+| `AI summary FAILED … HTTP status 429 … rate limited` | Too many requests too quickly, or a usage limit was hit; check the limits in the Anthropic console. |
 | `AI summary skipped … daily limit … (AI_DAILY_LIMIT)` | The app-wide daily cap was reached; visitors see the hand-written example. |
 | `… this visitor has used all 3 summaries (AI_SESSION_LIMIT)` | One visitor hit the per-visit cap. |
 | `SEC financials FAILED … HTTP 403 …` | The SEC rejected the request: `SEC_USER_AGENT` is missing its contact address or is malformed. |

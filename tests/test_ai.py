@@ -260,7 +260,7 @@ def test_fresh_calls_counter_only_counts_real_attempts(monkeypatch):
     assert ai.fresh_calls == before + 1                           # the blocked attempt was not counted
 
 
-@pytest.mark.parametrize("status, word", [(401, "ANTHROPIC_API_KEY"), (404, "AI_MODEL"), (429, "credit")])
+@pytest.mark.parametrize("status, word", [(401, "ANTHROPIC_API_KEY"), (404, "AI_MODEL"), (400, "AI_MODEL"), (429, "rate limited")])
 def test_failures_say_what_to_check(caplog, status, word):
     error = RuntimeError("boom")
     error.status_code = status
@@ -268,3 +268,15 @@ def test_failures_say_what_to_check(caplog, status, word):
         with pytest.raises(ai.AiUnavailable):
             ai.summarise("ACME", "Acme", HEADLINES, client=FakeClient(error=error))
     assert word in caplog.text and f"HTTP status {status}" in caplog.text
+
+
+def test_an_account_with_no_credit_is_called_out_as_such_not_as_a_model_problem(caplog):
+    # reported by the API as an invalid request (400), so the status alone would point at the wrong thing
+    error = RuntimeError("Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing "
+                         "to upgrade or purchase credits.")
+    error.status_code = 400
+    with caplog.at_level("WARNING", logger="stockdash.ai"):
+        with pytest.raises(ai.AiUnavailable):
+            ai.summarise("ACME", "Acme", HEADLINES, client=FakeClient(error=error))
+    assert "out of credit" in caplog.text and "Plans & Billing" in caplog.text
+    assert "check AI_MODEL" not in caplog.text
