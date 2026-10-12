@@ -15,6 +15,135 @@ via [yfinance](https://github.com/ranaroussi/yfinance).
 
 ![Dashboard screenshot](screenshot.png)
 
+### How it works
+
+**The big picture.** One small Streamlit app on a Heroku dyno. It reads three outside services (Yahoo Finance, the
+SEC, and optionally Anthropic's API) through caches, so a repeat view costs nothing and memory stays bounded.
+The two features that need credentials are **off unless configured**.
+
+```mermaid
+flowchart TB
+    visitor(["👤 <b>Visitor</b><br/>phone or desktop browser"])
+
+    subgraph heroku["☁️ Heroku web dyno · Python 3.12 · 512 MB"]
+        app["<b>Stock Price Dashboard.py</b><br/>Streamlit app: search box, header numbers,<br/>shareable state in the URL (?symbol=AAPL)"]
+
+        subgraph views["Four views, one at a time"]
+            price["📈 <b>Price</b><br/>chart · compare ·<br/>moving averages"]
+            news["📰 <b>News</b><br/>headlines · AI bull/bear<br/>summary · practice box"]
+            fin["🏛️ <b>Financials</b><br/>SEC figures · filings<br/><i>needs SEC_USER_AGENT</i>"]
+            learn["🎓 <b>Learn</b><br/>guides · risk figures ·<br/>how people decide"]
+        end
+
+        csv[("📋 <b>tickers.csv</b><br/>about 11,700 US stocks and ETFs")]
+        cache[("🗄️ <b>In-memory caches</b><br/>expire after minutes or hours,<br/>size-capped, failures never cached")]
+        adapters["<b>Adapters</b><br/>yfinance · sec.py · ai.py<br/><i>ai.py needs ANTHROPIC_API_KEY</i>"]
+        logs["📜 <b>Logs</b><br/>one line per event, no secrets"]
+    end
+
+    yahoo["📉 <b>Yahoo Finance</b><br/>prices · headlines<br/><i>unofficial, via yfinance</i>"]
+    edgar["🏛️ <b>SEC EDGAR</b><br/>financials · filings<br/><i>official and free</i>"]
+    claude["🤖 <b>Anthropic API</b><br/>Claude writes the summary<br/><i>only when someone clicks</i>"]
+    nasdaq["🗂️ <b>Nasdaq Trader</b><br/>symbol directories"]
+    script["scripts/update_tickers.py<br/><i>run by hand</i>"]
+
+    visitor <-->|"HTTPS"| app
+    app -->|"search and company details"| csv
+    app --> price & news & fin & learn
+    price & news & fin & learn --> cache
+    cache -->|"only on a miss"| adapters
+    adapters -->|"prices 1 h · headlines 15 min"| yahoo
+    adapters -->|"financials 6 h · filings 1 h"| edgar
+    adapters -->|"summaries 1 h"| claude
+    app -.-> logs
+    nasdaq --> script --> csv
+
+    classDef browser fill:#e8f1ff,stroke:#3b82f6,color:#111
+    classDef inapp fill:#eefbea,stroke:#22a559,color:#111
+    classDef store fill:#fff6e0,stroke:#e0a100,color:#111
+    classDef external fill:#f3e8ff,stroke:#8b5cf6,color:#111
+    classDef offline fill:#f1f1f1,stroke:#888,color:#111
+    class visitor browser
+    class app,price,news,fin,learn,adapters,logs inapp
+    class cache,csv store
+    class yahoo,edgar,claude external
+    class nasdaq,script offline
+    style heroku fill:#fafafa,stroke:#999,color:#111
+    style views fill:#ffffff,stroke:#bbb,stroke-dasharray: 4 4,color:#111
+```
+
+**What happens when someone clicks "Summarise the headlines".** This is the one flow with several safeguards, so
+it is worth spelling out. The model only ever sees the headlines on the page, and nothing it says is shown until
+the app has checked it.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor V as Visitor
+    participant A as Streamlit app
+    participant C as Summary cache (1 h)
+    participant G as ai.py guard rails
+    participant M as Anthropic API (Claude)
+    participant L as Heroku logs
+
+    V->>A: Click "Summarise the headlines"
+    alt this visitor already used their summaries (default 3)
+        A->>L: limit reached
+        A-->>V: A note, and the hand-written example
+    else
+        A->>C: Same headlines summarised already?
+        alt cache hit
+            C-->>A: Saved summary, free
+            A->>L: served from the cache
+        else cache miss
+            A->>G: summarise the numbered headlines
+            G->>G: Daily limit left? (default 100 a day)
+            G->>G: Strip angle brackets, number the headlines
+            G->>M: Rules + headlines, JSON schema, effort low
+            M-->>G: Bull and bear points, each citing headline numbers
+            G->>G: Drop citations that do not exist, keep 3 points a side at most
+            G->>L: time, tokens in and out, points kept or dropped
+            G-->>A: Checked summary, now cached
+        end
+        A-->>V: Bulls and bears boxes, numbers link to the headlines
+    end
+    Note over V,L: If anything fails the visitor sees a friendly note and the hand-written example. The log says why.
+```
+
+**How long things are kept.** Every cache has an expiry and a size cap (the oldest entries are dropped first), and
+a failed or empty answer is never cached, so a brief outage can't stick.
+
+| Data | Source | Kept for | Most entries |
+| --- | --- | --- | --- |
+| Price history | Yahoo Finance | 1 hour | 100 (about 100 MB at most) |
+| Headlines | Yahoo Finance | 15 minutes | 200 |
+| SEC company list | SEC EDGAR | 24 hours | 1 |
+| Financials | SEC EDGAR | 6 hours | 100 |
+| Filing lists | SEC EDGAR | 1 hour | 100 |
+| AI summaries | Anthropic API | 1 hour | 200 |
+
+**Where things live**
+
+| File | What it does |
+| --- | --- |
+| `Stock Price Dashboard.py` | The app: search, the four views, caches, URL sharing and logging |
+| `ai.py` | The AI summary: prompt, limits, checks on the answer, logging |
+| `sec.py` | The SEC EDGAR client: annual financials and recent filings (no Streamlit code) |
+| `layout.py` | A number grid that wraps to fit a phone |
+| `tickers.csv`, `scripts/update_tickers.py` | The company list, and the script that rebuilds it |
+| `tests/` | The automated tests (no network or API key needed) |
+| `Procfile`, `setup.sh`, `requirements.txt`, `.python-version` | How Heroku builds and starts the app |
+
+**Choices worth knowing about**
+- **Optional features stay off until configured.** With no environment variables the app is just the price, news
+  and learn views, so a fresh deploy can't break on a missing key.
+- **The AI is boxed in.** It sees only the numbered headlines, it must cite them by number, the app drops any
+  citation that doesn't exist, and there are per-visit and daily limits with a hand-written fallback.
+- **Failures are loud in the log and quiet on the page.** Visitors see a short friendly note; the log line says
+  what failed and what to check.
+- **The weakest link is Yahoo Finance.** `yfinance` uses an unofficial endpoint: fine for a portfolio project,
+  and the first thing to replace with a licensed data source if the app ever grows or earns money.
+
 ### Run locally
 
 ```bash
