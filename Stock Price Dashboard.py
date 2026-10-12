@@ -15,9 +15,28 @@ def load_tickers():
     return df
 
 
+class NoPriceData(Exception):
+    pass
+
+
 @st.cache_data(ttl=3600)
+def _download_history(symbol):
+    history = yf.Ticker(symbol).history(period='max')
+    if history.empty:
+        # raising keeps a failed or empty reply out of the cache, so a Yahoo hiccup doesn't stick for an hour
+        raise NoPriceData(symbol)
+    return history
+
+
 def load_history(symbol):
-    return yf.Ticker(symbol).history(period='max')
+    """Price history; an empty frame if Yahoo has none for the symbol; None if Yahoo could not be reached."""
+    try:
+        return _download_history(symbol)
+    except NoPriceData:
+        return pd.DataFrame()
+    except Exception:
+        st.error("Couldn't reach Yahoo Finance right now. Please try again in a minute.")
+        return None
 
 
 def change_text(series, symbol=None):
@@ -30,29 +49,66 @@ def change_text(series, symbol=None):
 
 
 tickers = load_tickers()
+symbols = set(tickers['Symbol'])
+
+
+def search_companies(query, limit=25):
+    """Best matches first: exact symbol, symbol prefix, name prefix, symbol contains, name contains.
+    (Streamlit's built-in selectbox search does not favour exact symbols once the list is this long.)"""
+    q = query.strip().lower()
+    sym = tickers['Symbol'].str.lower()
+    name = tickers['Company Name'].str.lower()
+    rank = pd.Series(9, index=tickers.index)  # 9 = no match; later lines overwrite with better ranks
+    rank[name.str.contains(q, regex=False)] = 4
+    rank[sym.str.contains(q, regex=False)] = 3
+    rank[name.str.startswith(q)] = 2
+    rank[sym.str.startswith(q)] = 1
+    rank[sym == q] = 0
+    hits = tickers[rank < 9].assign(rank=rank[rank < 9], is_etf=lambda d: d['Type'] == 'ETF')
+    return hits.sort_values(['rank', 'is_etf', 'Symbol']).head(limit)
+
+
+def company_picker(title, key, initial=''):
+    """Search box plus a list of ranked matches. Returns the chosen company row, or None."""
+    if f'{key}_query' not in st.session_state:
+        st.session_state[f'{key}_query'] = initial
+    query = st.text_input(title, key=f'{key}_query',
+                          placeholder='Type a symbol or company name, then press Enter')
+    if not query.strip():
+        return None
+    hits = search_companies(query)
+    if hits.empty:
+        st.warning(f'No company matches "{query}".')
+        return None
+    if len(hits) == 1:
+        return hits.iloc[0]
+    # the key includes the query so each new search starts on its best match
+    pick = st.selectbox('Matches, best first', hits['Label'].tolist(), key=f"{key}_pick_{query.strip().lower()}")
+    return hits[hits['Label'] == pick].iloc[0]
 
 st.title("📈 Stock Price Dashboard")
 st.caption("by [haramrit singh khurana](https://haramrit09k.github.io)")
 
-label_of = dict(zip(tickers['Symbol'], tickers['Label']))
-labels = list(label_of.values())
-
-# Pick the starting company and range from the URL (?symbol=AAPL&range=1Y) so views can be shared.
-# Only set once per session, so later widget changes are not overwritten.
-if 'company' not in st.session_state:
-    st.session_state.company = label_of.get(st.query_params.get('symbol'), label_of.get('AAPL', labels[0]))
+# Pick the starting company, range and comparison from the URL (?symbol=AAPL&compare=MSFT&range=1Y)
+# so views can be shared. Only set once per session, so later widget changes are not overwritten.
 if 'range' not in st.session_state:
     r = st.query_params.get('range')
     st.session_state.range = r if r in RANGES else '1Y'
-if 'compare' not in st.session_state:
-    st.session_state.compare = label_of.get(st.query_params.get('compare'))
+start_symbol = st.query_params.get('symbol')
+start_symbol = start_symbol if start_symbol in symbols else 'AAPL'
+start_compare = st.query_params.get('compare')
+start_compare = start_compare if start_compare in symbols else ''
 
-choice = st.selectbox('Select company', labels, key='company')
-company = tickers[tickers['Label'] == choice].iloc[0]
+company = company_picker('Search for a company', 'company', start_symbol)
+if company is None:
+    st.info("Enter a symbol or company name above to get started.")
+    st.stop()
 # keep the URL in sync with the selection so it can be copied and shared
 st.query_params['symbol'] = company['Symbol']
 
 history = load_history(company['Symbol'])
+if history is None:
+    st.stop()
 
 st.subheader(f"{company['Symbol']} · {company['Company Name']}")
 
@@ -86,25 +142,24 @@ days = RANGES[range_choice]
 st.query_params['range'] = range_choice
 view = history if days is None else history[history.index >= history.index[-1] - pd.Timedelta(days=days)]
 
-compare_choice = st.selectbox('Compare with (optional)', labels, index=None, key='compare',
-                              placeholder='Type a symbol or company name')
+other = company_picker('Compare with (optional)', 'compare', start_compare)
 
 # optional second company, drawn on the same chart
-other = None
-if compare_choice:
-    other = tickers[tickers['Label'] == compare_choice].iloc[0]
+if other is not None:
     if other['Symbol'] == company['Symbol']:
         st.info("Pick a different company to compare.")
         other = None
     else:
         other_history = load_history(other['Symbol'])
-        if other_history.empty:
+        if other_history is None:
+            other = None
+        elif other_history.empty:
             st.warning(f"No price data found for {other['Symbol']}, so it can't be compared.")
             other = None
 
 if other is not None:
     # rebase both to 100 at the start so growth is comparable, using only the days both traded
-    closes = pd.concat({company['Symbol']: history['Close'], other['Symbol']: other_history['Close']}, axis=1)
+    closes = pd.concat({company['Symbol']: history['Close'], other['Symbol']: other_history['Close']}, axis=1, sort=True)
     closes.index = closes.index.tz_localize(None)
     closes = closes.dropna()
     if days is not None:
@@ -150,6 +205,6 @@ with st.expander("Company details"):
 - **Company name:** {company['Company Name']}
 - **Symbol:** {company['Symbol']}
 - **Security name:** {company['Security Name']}
-- **Market category:** {company['Market Category']}
-- **Financial status:** {company['Financial Status']}
+- **Exchange:** {company['Exchange']}
+- **Type:** {company['Type']}
 """)
