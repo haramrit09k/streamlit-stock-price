@@ -31,7 +31,7 @@ Everything below is optional; the app runs without any of it. Set them where the
 | --- | --- |
 | `SEC_USER_AGENT` | Turns on the **Financials** view. The SEC requires every program to identify itself, so use a project name and a monitored contact address, e.g. `Stock Price Dashboard you@example.com`. Use an address made for the project rather than a personal one. |
 | `ANTHROPIC_API_KEY` | Turns on the AI summary in the **News** view. Without it, or when the limits below are reached, the app shows a hand-written example instead. |
-| `AI_MODEL` | Model used for the summaries. Default `claude-opus-5-5`; a cheaper model such as `claude-haiku-5-5` also works and costs far less. |
+| `AI_MODEL` | Model used for the summaries. Default `claude-haiku-5-5` (about 0.06 cents per summary). `claude-sonnet-5-5` (about 1 cent) or `claude-opus-5-5` (about 2 cents) are stronger; try them if the summaries stray beyond the headlines. Estimates, not measurements. |
 | `AI_DAILY_LIMIT` | Most fresh AI summaries per day for the whole app (default `100`). Results are cached per set of headlines, so repeat clicks don't count. Also set a spend limit in your Anthropic console. |
 | `AI_SESSION_LIMIT` | Most summaries one visitor can request per visit (default `3`). |
 

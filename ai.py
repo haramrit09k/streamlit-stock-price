@@ -2,7 +2,8 @@
 
 Configuration (environment variables; nothing is read from, or written to, the code):
   ANTHROPIC_API_KEY   required; without it configured() is False and the app skips the feature
-  AI_MODEL            optional; defaults to claude-opus-5-5 (a much cheaper model such as claude-haiku-5-5 also works)
+  AI_MODEL            optional; defaults to claude-haiku-5-5 (cheap, and enough for summarising a few headlines);
+                      claude-sonnet-5-5 or claude-opus-5-5 are stronger and cost more
   AI_DAILY_LIMIT      optional; most fresh summaries per day for the whole app (default 100)
 
 The model sees only the numbered headlines and is asked to cite them by number. The numbers are mapped back to
@@ -14,7 +15,7 @@ import os
 import re
 import threading
 
-MODEL = os.environ.get("AI_MODEL", "claude-opus-5-5")
+MODEL = os.environ.get("AI_MODEL", "claude-haiku-5-5")
 
 SIDE = {
     "type": "array",
