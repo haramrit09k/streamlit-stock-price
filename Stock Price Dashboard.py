@@ -1,6 +1,7 @@
 import yfinance as yf
 import streamlit as st
 import pandas as pd
+import altair as alt
 
 st.set_page_config(page_title="Stock Price Dashboard", page_icon="📈", layout="centered")
 
@@ -63,7 +64,13 @@ days = RANGES[range_choice]
 view = history if days is None else history[history.index >= history.index[-1] - pd.Timedelta(days=days)]
 
 st.subheader("Closing price (USD)")
-st.line_chart(view['Close'])
+# let the y-axis fit the data instead of starting at 0, so price moves are visible
+price_chart = alt.Chart(view['Close'].reset_index()).mark_line().encode(
+    x=alt.X('Date:T', title=None),
+    y=alt.Y('Close:Q', scale=alt.Scale(zero=False), title=None),
+    tooltip=[alt.Tooltip('Date:T'), alt.Tooltip('Close:Q', format='$.2f')],
+)
+st.altair_chart(price_chart)
 
 st.subheader("Volume")
 st.bar_chart(view['Volume'])
