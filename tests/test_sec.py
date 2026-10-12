@@ -117,3 +117,13 @@ def test_configured_depends_only_on_the_user_agent_setting(monkeypatch):
     assert not sec.configured()
     monkeypatch.setenv("SEC_USER_AGENT", "Some Project contact@example.com")
     assert sec.configured()
+
+
+def test_explain_says_what_to_check_and_never_includes_the_contact(monkeypatch):
+    monkeypatch.setenv("SEC_USER_AGENT", "Secret Project private.person@example.com")
+    forbidden = urllib.error.HTTPError("https://data.sec.gov/x.json", 403, "Forbidden", {}, io.BytesIO())
+    text = sec.explain(forbidden)
+    assert "403" in text and "https://data.sec.gov/x.json" in text and "SEC_USER_AGENT" in text
+    assert "private.person" not in text and "Secret Project" not in text
+    assert "rate limited" in sec.explain(urllib.error.HTTPError("u", 429, "x", {}, io.BytesIO()))
+    assert "URLError" in sec.explain(urllib.error.URLError("name resolution failed"))

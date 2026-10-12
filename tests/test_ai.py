@@ -74,7 +74,7 @@ def test_request_shape_for_the_current_api():
     client = FakeClient(reply())
     ai.summarise("ACME", "Acme Corp", HEADLINES, client=client)
     call = client.calls[0]
-    assert call["model"] == ai.MODEL
+    assert call["model"] == ai.model()
     assert call["output_config"]["format"]["type"] == "json_schema"
     assert call["output_config"]["effort"] == "low"
     for forbidden in ("thinking", "temperature", "top_p", "top_k", "tool_choice", "prefill"):
@@ -138,3 +138,133 @@ def test_configured_depends_only_on_the_key(monkeypatch):
     assert not ai.configured()
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
     assert ai.configured()
+
+
+@pytest.mark.parametrize("raw, expected", [
+    (None, "claude-haiku-5-5"),                   # unset
+    ("", "claude-haiku-5-5"),                     # set but empty
+    ("   ", "claude-haiku-5-5"),
+    ("claude-sonnet-5-5", "claude-sonnet-5-5"),
+    ("  claude-sonnet-5-5\n", "claude-sonnet-5-5"),     # stray whitespace
+    ('"claude-opus-5-5"', "claude-opus-5-5"),           # quotes pasted into a settings page
+    ("'claude-opus-5-5'", "claude-opus-5-5"),
+    (' "claude-haiku-5-5" ', "claude-haiku-5-5"),
+])
+def test_model_setting_is_cleaned_up(monkeypatch, raw, expected):
+    if raw is None:
+        monkeypatch.delenv("AI_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("AI_MODEL", raw)
+    assert ai.model() == expected
+
+
+def test_the_cleaned_model_is_what_gets_sent(monkeypatch):
+    monkeypatch.setenv("AI_MODEL", ' "claude-sonnet-5-5" ')
+    client = FakeClient(reply())
+    ai.summarise("ACME", "Acme", HEADLINES, client=client)
+    assert client.calls[0]["model"] == "claude-sonnet-5-5"
+
+
+def test_keys_are_scrubbed_from_log_text():
+    assert "sk-ant-api03-AbC_123-xyz" not in ai.scrub("401 invalid key sk-ant-api03-AbC_123-xyz for org")
+    assert "[redacted]" in ai.scrub("key sk-ant-api03-AbC_123-xyz")
+
+
+def test_a_failed_call_is_logged_with_the_reason_but_never_the_key(caplog):
+    error = RuntimeError("401 invalid x-api-key sk-ant-api03-SECRET123")
+    error.status_code = 401
+    with caplog.at_level("WARNING", logger="stockdash.ai"):
+        with pytest.raises(ai.AiUnavailable):
+            ai.summarise("ACME", "Acme", HEADLINES, client=FakeClient(error=error))
+    text = caplog.text
+    assert "RuntimeError" in text and "401" in text and "claude-haiku-5-5" in text
+    assert "SECRET123" not in text and "sk-ant" not in text
+
+
+@pytest.mark.parametrize("stop, word", [("refusal", "refused"), ("max_tokens", "cut off")])
+def test_refusals_and_truncation_are_logged(caplog, stop, word):
+    with caplog.at_level("WARNING", logger="stockdash.ai"):
+        with pytest.raises(ai.AiUnavailable):
+            ai.summarise("ACME", "Acme", HEADLINES, client=FakeClient(reply(), stop_reason=stop))
+    assert word in caplog.text
+
+
+def test_hitting_the_daily_limit_is_logged(monkeypatch, caplog):
+    monkeypatch.setenv("AI_DAILY_LIMIT", "0")
+    with caplog.at_level("WARNING", logger="stockdash.ai"):
+        with pytest.raises(ai.AiUnavailable):
+            ai.summarise("ACME", "Acme", HEADLINES, client=FakeClient(reply()))
+    assert "daily limit" in caplog.text
+
+
+def test_setup_line_never_contains_the_key(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-SECRET123")
+    monkeypatch.setenv("AI_MODEL", "claude-haiku-5-5")
+    line = ai.describe_setup()
+    assert "SECRET" not in line and "on, model='claude-haiku-5-5'" in line
+    monkeypatch.setenv("AI_MODEL", "claude-haiku-5.5")  # a typo is called out
+    assert "check AI_MODEL" in ai.describe_setup()
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    assert ai.describe_setup().startswith("off")
+
+
+@pytest.mark.parametrize("lookalike", ["‑", "‐", "–", "—", "−"])
+def test_lookalike_dashes_in_the_model_name_are_fixed(monkeypatch, lookalike):
+    # copying 'claude-haiku-5-5' from a web page or chat can bring non-breaking hyphens or en dashes along
+    monkeypatch.setenv("AI_MODEL", f"claude{lookalike}haiku{lookalike}5{lookalike}5")
+    assert ai.model() == "claude-haiku-5-5"
+
+
+def test_invisible_characters_are_removed(monkeypatch):
+    monkeypatch.setenv("AI_MODEL", "﻿claude-haiku-5-5​ ")
+    assert ai.model() == "claude-haiku-5-5"
+
+
+def test_startup_line_shows_hidden_characters_instead_of_hiding_them(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    monkeypatch.setenv("AI_MODEL", "claude‑haiku-5-5")
+    line = ai.describe_setup()
+    assert "model='claude-haiku-5-5'" in line                 # what is actually used
+    assert "cleaned up" in line and "\\u2011" in line         # and exactly what was found in the setting
+
+
+def test_a_clean_setting_gets_no_cleaned_up_note(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    monkeypatch.setenv("AI_MODEL", "claude-haiku-5-5")
+    assert "cleaned up" not in ai.describe_setup()
+
+
+def test_success_is_logged_with_tokens_and_dropped_citations(caplog):
+    usage = types.SimpleNamespace(input_tokens=1234, output_tokens=567)
+    client = FakeClient(reply(bull=[{"point": "a", "headlines": [1]}, {"point": "no real citation", "headlines": [42]}]))
+    original = client.create
+
+    def with_usage(**kw):
+        response = original(**kw)
+        response.usage = usage
+        return response
+    client.messages = types.SimpleNamespace(create=with_usage)
+    with caplog.at_level("INFO", logger="stockdash.ai"):
+        ai.summarise("ACME", "Acme", HEADLINES, client=client)
+    assert "AI summary ok for ACME" in caplog.text and "in=1234 out=567" in caplog.text
+    assert "kept 2 of 3" in caplog.text and "dropped" in caplog.text   # one bull argument cited a headline that doesn't exist
+
+
+def test_fresh_calls_counter_only_counts_real_attempts(monkeypatch):
+    before = ai.fresh_calls
+    ai.summarise("A", "A", HEADLINES, client=FakeClient(reply()))
+    assert ai.fresh_calls == before + 1
+    monkeypatch.setenv("AI_DAILY_LIMIT", "0")
+    with pytest.raises(ai.AiUnavailable):
+        ai.summarise("B", "B", HEADLINES, client=FakeClient(reply()))
+    assert ai.fresh_calls == before + 1                           # the blocked attempt was not counted
+
+
+@pytest.mark.parametrize("status, word", [(401, "ANTHROPIC_API_KEY"), (404, "AI_MODEL"), (429, "credit")])
+def test_failures_say_what_to_check(caplog, status, word):
+    error = RuntimeError("boom")
+    error.status_code = status
+    with caplog.at_level("WARNING", logger="stockdash.ai"):
+        with pytest.raises(ai.AiUnavailable):
+            ai.summarise("ACME", "Acme", HEADLINES, client=FakeClient(error=error))
+    assert word in caplog.text and f"HTTP status {status}" in caplog.text

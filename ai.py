@@ -11,11 +11,16 @@ real links by the app, and any citation that doesn't exist is dropped, so a sour
 """
 import datetime as dt
 import json
+import logging
 import os
 import re
 import threading
+import time
 
-MODEL = os.environ.get("AI_MODEL", "claude-haiku-5-5")
+log = logging.getLogger("stockdash.ai")  # shows up in `heroku logs`; never put keys or visitor data in these messages
+
+DEFAULT_MODEL = "claude-haiku-5-5"
+KNOWN_MODELS = ("claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5")
 
 SIDE = {
     "type": "array",
@@ -54,6 +59,7 @@ Rules:
 
 _lock = threading.Lock()
 _budget = {"day": None, "used": 0}
+fresh_calls = 0  # how many times a real model call was attempted since the process started
 
 
 class AiUnavailable(Exception):
@@ -62,6 +68,40 @@ class AiUnavailable(Exception):
     def __init__(self, reason):
         super().__init__(reason)
         self.reason = reason
+
+
+_DASHES = dict.fromkeys(map(ord, "\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe58\ufe63\uff0d"), "-")  # look-alike hyphens
+_INVISIBLE = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"), None)
+
+
+def raw_model():
+    return os.environ.get("AI_MODEL", "")
+
+
+def model():
+    """The model to use: AI_MODEL cleaned of things that are easy to add by accident when copying it into a
+    settings page (stray spaces, quotes, invisible characters, and look-alike dashes such as the non-breaking
+    hyphen), or the default if it is unset or empty."""
+    cleaned = raw_model().translate(_DASHES).translate(_INVISIBLE).replace("\u00a0", " ")
+    return cleaned.strip().strip("\"'").strip() or DEFAULT_MODEL
+
+
+def scrub(text):
+    """Remove anything that looks like an Anthropic key before text goes into a log line."""
+    return re.sub(r"sk-ant-[A-Za-z0-9_-]+", "[redacted]", str(text))
+
+
+def describe_setup():
+    """One line saying how the feature is configured, for the startup log (no secrets). Uses %a-style escaping
+    for the model so a hidden character shows up as \\uXXXX instead of looking like a normal letter."""
+    if not configured():
+        return "off (ANTHROPIC_API_KEY is not set)"
+    line = f"on, model={ascii(model())}, daily limit={daily_limit()}"
+    if raw_model().strip() and raw_model() != model():
+        line += f"  | AI_MODEL was cleaned up: raw value {ascii(raw_model())}"
+    if model() not in KNOWN_MODELS:
+        line += "  | NOT one of " + ", ".join(KNOWN_MODELS) + ": check AI_MODEL for typos"
+    return line
 
 
 def configured():
@@ -120,25 +160,59 @@ def clean(result, count):
 
 
 def summarise(symbol, name, headlines, client=None):
-    """Returns {"bull": [...], "bear": [...], "unclear": str}. Raises AiUnavailable."""
-    take_budget()
+    """Returns {"bull": [...], "bear": [...], "unclear": str}. Raises AiUnavailable. Every outcome is logged."""
+    global fresh_calls
+    try:
+        take_budget()
+    except AiUnavailable:
+        log.warning("AI summary skipped for %s: daily limit of %s fresh summaries reached (AI_DAILY_LIMIT)",
+                    symbol, daily_limit())
+        raise
+    use_model = model()
+    fresh_calls += 1
+    started = time.monotonic()
+    log.info("AI summary: calling the model for %s (model=%s, %d headlines, %d of %d used today)",
+             symbol, ascii(use_model), len(headlines), _budget["used"], daily_limit())
     try:
         client = client or get_client()
         response = client.messages.create(
-            model=MODEL,
+            model=use_model,
             max_tokens=16000,
             system=SYSTEM,
             output_config={"effort": "low", "format": {"type": "json_schema", "schema": SCHEMA}},
             messages=[{"role": "user", "content": build_prompt(symbol, name, headlines)}],
         )
-    except Exception as error:  # includes missing package, bad key, rate limit, network; never echo the details
+    except Exception as error:  # includes missing package, bad key, wrong model name, rate limit, network
+        # Visitors only ever see a generic message; the details go to the log (with anything key-like removed).
+        status = getattr(error, "status_code", None)
+        log.warning("AI summary FAILED for %s (model=%s): %s, HTTP status %s: %s%s", symbol, ascii(use_model),
+                    type(error).__name__, status if status else "n/a",
+                    scrub(getattr(error, "message", None) or error)[:300], _hint(status))
         raise AiUnavailable("error") from error
     if response.stop_reason == "refusal":
+        log.warning("AI summary refused by the model for %s (model=%s)", symbol, ascii(use_model))
         raise AiUnavailable("refused")
     if response.stop_reason == "max_tokens":
+        log.warning("AI summary cut off at max_tokens for %s (model=%s)", symbol, ascii(use_model))
         raise AiUnavailable("too_long")
     try:
         text = next(block.text for block in response.content if block.type == "text")
-        return clean(json.loads(text), len(headlines))
+        raw = json.loads(text)
+        result = clean(raw, len(headlines))
     except (StopIteration, ValueError, AttributeError, TypeError) as error:
+        log.warning("AI summary came back unusable for %s (model=%s): %s", symbol, ascii(use_model), type(error).__name__)
         raise AiUnavailable("bad_output") from error
+    usage = getattr(response, "usage", None)
+    given = sum(len(raw.get(side) or []) for side in ("bull", "bear") if isinstance(raw, dict) and isinstance(raw.get(side), list))
+    kept = len(result["bull"]) + len(result["bear"])
+    log.info("AI summary ok for %s: %.1fs, tokens in=%s out=%s, arguments kept %d of %d%s", symbol,
+             time.monotonic() - started, getattr(usage, "input_tokens", "?"), getattr(usage, "output_tokens", "?"),
+             kept, given, "  (some were dropped for missing or invalid citations)" if kept < given else "")
+    return result
+
+
+def _hint(status):
+    """What to check for the common HTTP failures."""
+    return {400: " | check AI_MODEL and the request", 401: " | the API key was rejected: check ANTHROPIC_API_KEY",
+            403: " | the key isn't allowed to use this model or feature", 404: " | the model name wasn't found: check AI_MODEL",
+            429: " | rate limited or out of credit: check usage and billing in the Anthropic console"}.get(status, "")
