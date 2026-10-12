@@ -1,4 +1,5 @@
 import datetime as dt
+import logging
 import os
 import re
 
@@ -10,7 +11,34 @@ import altair as alt
 import ai
 import sec
 
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")  # no-op if already set up
+
+
 st.set_page_config(page_title="Stock Price Dashboard", page_icon="📈", layout="centered")
+
+
+log = logging.getLogger("stockdash")
+
+
+@st.cache_resource(show_spinner=False)
+def log_setup():
+    """Runs once per server process (not on every page interaction): what is installed and what is switched on.
+    Secrets are never logged; the SEC contact is only reported as set or not set."""
+    import platform
+    from importlib import metadata
+
+    def version(package):
+        try:
+            return metadata.version(package)
+        except metadata.PackageNotFoundError:
+            return "NOT INSTALLED"
+    log.info("Starting: python %s, streamlit %s, yfinance %s, pandas %s, anthropic %s", platform.python_version(),
+             version("streamlit"), version("yfinance"), version("pandas"), version("anthropic"))
+    log.info("Companies list: %d symbols loaded from tickers.csv", len(load_tickers()))
+    log.info("Financials view: %s", "on (SEC_USER_AGENT is set)" if sec.configured() else "off (SEC_USER_AGENT is not set)")
+    log.info("AI summaries: %s", ai.describe_setup())
+
+
 
 RANGES = {"1M": 30, "6M": 182, "1Y": 365, "5Y": 365 * 5, "Max": None}
 # The Financials view needs the SEC_USER_AGENT environment variable (see sec.py); without it the view is hidden.
@@ -131,8 +159,10 @@ def load_history(symbol):
     try:
         return _download_history(symbol)
     except NoPriceData:
+        log.info("Yahoo has no price data for %s (delisted, or not a symbol Yahoo knows)", symbol)
         return pd.DataFrame()
-    except Exception:
+    except Exception as error:
+        log.warning("Yahoo price history FAILED for %s: %s: %s", symbol, type(error).__name__, str(error)[:200])
         st.error("Couldn't reach Yahoo Finance right now. Please try again in a minute.")
         return None
 
@@ -166,8 +196,10 @@ def load_news(symbol):
     try:
         return _download_news(symbol)
     except NoNews:
+        log.info("Yahoo returned no headlines that mention %s", symbol)
         return []
-    except Exception:
+    except Exception as error:
+        log.warning("Yahoo news FAILED for %s: %s: %s", symbol, type(error).__name__, str(error)[:200])
         return None
 
 
@@ -223,6 +255,7 @@ def risk_summary(close):
 
 tickers = load_tickers()
 symbols = set(tickers['Symbol'])
+log_setup()
 
 
 def search_companies(query, limit=25):
@@ -498,10 +531,13 @@ def financials_view():
     try:
         cik = sec_ciks().get(company['Symbol'])
         table = sec_financials(cik) if cik else None
-    except Exception:
+    except Exception as error:
+        log.warning("SEC financials FAILED for %s: %s", company['Symbol'], sec.explain(error))
         st.error("Couldn't load data from the SEC right now. Please try again in a minute.")
         return
     if table is None:
+        log.info("SEC has no financial data for %s (%s)", company['Symbol'],
+                 "not in the SEC's company list" if not cik else f"CIK {cik}: a fund or a filer without US-GAAP data")
         st.info(f"The SEC's financial data isn't available for {company['Symbol']}. Funds such as ETFs, and many "
                 "companies based outside the US, file different reports.")
         return
@@ -563,7 +599,8 @@ def financials_view():
     st.subheader("Recent filings")
     try:
         filings = sec_filings(cik)
-    except Exception:
+    except Exception as error:
+        log.warning("SEC filings list FAILED for %s: %s", company['Symbol'], sec.explain(error))
         filings = []
         st.caption("Couldn't load the list of filings right now.")
     for item in filings:
@@ -604,14 +641,21 @@ def news_view():
         saved_key = f"ai_{company['Symbol']}"
         if st.button("Summarise the headlines", key=f"ai_button_{company['Symbol']}"):
             if st.session_state.get('ai_used', 0) >= AI_SESSION_LIMIT:
+                log.info("AI summary: %s requested but this visitor has used all %d summaries for the visit "
+                         "(AI_SESSION_LIMIT)", company['Symbol'], AI_SESSION_LIMIT)
                 ai_note = "You've used all the AI summaries for this visit."
             else:
                 st.session_state['ai_used'] = st.session_state.get('ai_used', 0) + 1
+                calls_before = ai.fresh_calls
                 try:
                     with st.spinner("Reading the headlines..."):
                         st.session_state[saved_key] = {'headlines': headlines,
                                                        'result': ai_summary(company['Symbol'], company['Company Name'], headlines)}
+                    if ai.fresh_calls == calls_before:
+                        log.info("AI summary: served %s from the cache (no model call, nothing counted)", company['Symbol'])
                 except ai.AiUnavailable as unavailable:
+                    log.info("AI summary: shown to the visitor as unavailable (%s) for %s; see the lines above for why",
+                             unavailable.reason, company['Symbol'])
                     ai_note = AI_MESSAGES.get(unavailable.reason, AI_MESSAGES['error'])
         saved = st.session_state.get(saved_key)
         if ai_note:

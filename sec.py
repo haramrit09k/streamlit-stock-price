@@ -117,3 +117,14 @@ def recent_filings(cik, fetch=fetch_json, limit=8):
         if len(out) == limit:
             break
     return out
+
+
+def explain(error):
+    """A one-line, secret-free description of a failed SEC request, with what to check. (The User-Agent value,
+    which contains a contact address, is never included.)"""
+    if isinstance(error, urllib.error.HTTPError):
+        hint = {403: "the SEC rejects requests without a proper SEC_USER_AGENT (a project name plus a contact address)",
+                429: "rate limited: too many requests too quickly",
+                404: "the SEC has no such record"}.get(error.code, "unexpected response")
+        return f"HTTP {error.code} from {error.url}: {hint}"
+    return f"{type(error).__name__}: {str(error)[:200]}"

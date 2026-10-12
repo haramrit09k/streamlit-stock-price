@@ -38,6 +38,36 @@ Everything below is optional; the app runs without any of it. Set them where the
 The AI only ever sees the headlines shown on the page (no visitor data), and its answer is checked: any citation that
 doesn't match a real headline is dropped.
 
+### Reading the logs
+
+Heroku keeps the app's recent log for free, with no add-on: `heroku logs --tail -a <app>` (or the dashboard's
+**More → View logs**). The app writes one short line per important event, never a secret and never the SEC contact
+address. Lines start with `INFO` or `WARNING`; a `WARNING` means something failed and says what to check.
+
+| Line (shortened) | Meaning and what to do |
+| --- | --- |
+| `Starting: python 3.12…, streamlit …, anthropic …` | The app started. Check the versions here first if something behaves oddly. |
+| `Financials view: on / off (SEC_USER_AGENT is not set)` | Whether the Financials view is switched on. |
+| `AI summaries: on, model='claude-haiku-5-5', daily limit=50` | The AI is on and exactly which model name is used. Everything is cleaned (spaces, quotes, look-alike dashes), and if it was changed you will see `AI_MODEL was cleaned up: raw value '…'` with hidden characters written as `\uXXXX`. |
+| `AI summaries: off (ANTHROPIC_API_KEY is not set)` | No key, so the AI box is hidden. |
+| `… NOT one of claude-haiku-5-5, …: check AI_MODEL for typos` | The model name isn't one the app knows. It still tries it, but a 404 below means it's wrong. |
+| `AI summary: calling the model for AAPL (… 3 of 50 used today)` | A real model call started and counts toward the daily limit. |
+| `AI summary ok for AAPL: 2.1s, tokens in=… out=…, arguments kept 3 of 3` | It worked, with time and token usage (that is your cost). "kept 2 of 3 … dropped" means the model cited a headline that doesn't exist and the app removed that point. |
+| `AI summary: served AAPL from the cache` | Someone clicked again for the same headlines: no model call, no cost. |
+| `AI summary FAILED … HTTP status 404 … check AI_MODEL` | The model name wasn't found: fix `AI_MODEL`. |
+| `AI summary FAILED … HTTP status 401 … check ANTHROPIC_API_KEY` | The key was rejected: re-create it and re-set it. |
+| `AI summary FAILED … HTTP status 429 … check usage and billing` | Rate limited or out of credit. |
+| `AI summary skipped … daily limit … (AI_DAILY_LIMIT)` | The app-wide daily cap was reached; visitors see the hand-written example. |
+| `… this visitor has used all 3 summaries (AI_SESSION_LIMIT)` | One visitor hit the per-visit cap. |
+| `SEC financials FAILED … HTTP 403 …` | The SEC rejected the request: `SEC_USER_AGENT` is missing its contact address or is malformed. |
+| `SEC financials FAILED … HTTP 429 …` | Too many requests to the SEC too quickly; it clears by itself. |
+| `SEC has no financial data for SPY …` | Normal for ETFs and many foreign companies. |
+| `Yahoo price history FAILED for X: …` / `Yahoo news FAILED …` | Yahoo couldn't be reached or answered badly (Yahoo is an unofficial source and does this now and then). |
+| `Yahoo has no price data for X` | The symbol is delisted or unknown to Yahoo. |
+
+Heroku keeps roughly the last 1,500 lines for about a week. After changing a config var the app restarts, so the
+`Starting` lines at the top of the log are the quickest check that the new value was picked up.
+
 ### Tests
 
 ```bash
