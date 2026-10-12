@@ -9,6 +9,7 @@ import pandas as pd
 import altair as alt
 
 import ai
+import layout
 import sec
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")  # no-op if already set up
@@ -145,7 +146,9 @@ class NoPriceData(Exception):
     pass
 
 
-@st.cache_data(ttl=3600)
+# Caches are capped (oldest entries are dropped) so the app's memory stays bounded on a small Heroku dyno (512 MB).
+# A price history is about 0.6 MB on average and up to ~1 MB, so 100 of them is at most ~100 MB.
+@st.cache_data(ttl=3600, max_entries=100)
 def _download_history(symbol):
     history = yf.Ticker(symbol).history(period='max')
     if history.empty:
@@ -180,7 +183,7 @@ class NoNews(Exception):
     pass
 
 
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=900, max_entries=200)
 def _download_news(symbol):
     items = yf.Search(symbol, news_count=20).news
     # keep headlines that mention this company, newest first
@@ -342,17 +345,17 @@ if len(history) > 1:
     change = latest['Close'] - history['Close'].iloc[-2]
     change_pct = change / history['Close'].iloc[-2] * 100
 
-# prices on the first row, activity on the second, on one 4-column grid so everything lines up
-price_cols = st.columns(4)
-price_cols[0].metric("Close", f"${latest['Close']:,.2f}",
-                     None if change is None else f"{change:+.2f} ({change_pct:+.2f}%)", help=HELP['close'])
-price_cols[1].metric("Open", f"${latest['Open']:,.2f}", help=HELP['open'])
-price_cols[2].metric("High", f"${latest['High']:,.2f}", help=HELP['high'])
-price_cols[3].metric("Low", f"${latest['Low']:,.2f}", help=HELP['low'])
-activity_cols = st.columns(4)
-activity_cols[0].metric("Volume", compact(latest['Volume']),
-                        help=f"{HELP['volume']} Exact number on this day: {latest['Volume']:,.0f}.")
-activity_cols[1].metric("Dividends", f"${latest['Dividends']:,.2f}", help=HELP['dividends'])
+# prices first, then activity; the grid wraps to fit the screen (4 + 2 on a desktop, 2 + 2 + 2 on a phone)
+layout.metric_grid([
+    dict(label="Close", value=f"${latest['Close']:,.2f}", help=HELP['close'],
+         delta=None if change is None else f"{change:+.2f} ({change_pct:+.2f}%)"),
+    dict(label="Open", value=f"${latest['Open']:,.2f}", help=HELP['open']),
+    dict(label="High", value=f"${latest['High']:,.2f}", help=HELP['high']),
+    dict(label="Low", value=f"${latest['Low']:,.2f}", help=HELP['low']),
+    dict(label="Volume", value=compact(latest['Volume']),
+         help=f"{HELP['volume']} Exact number on this day: {latest['Volume']:,.0f}."),
+    dict(label="Dividends", value=f"${latest['Dividends']:,.2f}", help=HELP['dividends']),
+])
 
 # ---- one switch for the three kinds of content, so the first screen stays focused ----
 view = st.segmented_control("View", VIEWS, key='view', label_visibility='collapsed') or 'Price'
@@ -461,12 +464,12 @@ def sec_ciks():
     return sec.ticker_map()
 
 
-@st.cache_data(ttl=6 * 3600)
+@st.cache_data(ttl=6 * 3600, max_entries=100)
 def sec_financials(cik):
     return sec.annual_financials(cik)  # None (cached) means the SEC has no data; failures raise and are not cached
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, max_entries=100)
 def sec_filings(cik):
     return sec.recent_filings(cik)
 
@@ -496,7 +499,7 @@ AI_MESSAGES = {'budget': "The daily limit for AI summaries has been reached.",
                'error': "The AI summary isn't available right now."}
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=200)
 def ai_summary(symbol, name, headlines):
     """Cached per set of headlines, so repeat clicks (by anyone) cost nothing. Failures raise and are not cached."""
     return ai.summarise(symbol, name, list(headlines))
@@ -546,17 +549,18 @@ def financials_view():
                "dollars. They are shown as reported, without adjustment.")
     last = table.iloc[-1]
     st.markdown(f"**Fiscal year ended {table.index[-1].strftime('%B %d, %Y')}**")
-    cols = st.columns(3)
+    cards = []
     if 'Revenue' in table:
         growth = last.get('Revenue growth')
-        cols[0].metric("Revenue", money(last['Revenue']), None if pd.isna(growth) else f"{growth:+.1f}% vs year before",
-                       help=HELP['revenue'])
+        cards.append(dict(label="Revenue", value=money(last['Revenue']), help=HELP['revenue'],
+                          delta=None if pd.isna(growth) else f"{growth:+.1f}% vs year before"))
     if 'Net income' in table:
         margin = last.get('Net margin')
-        cols[1].metric("Net income", money(last['Net income']),
-                       None if pd.isna(margin) else f"{margin:.1f}% of revenue", delta_color='off', help=HELP['net_income'])
+        cards.append(dict(label="Net income", value=money(last['Net income']), help=HELP['net_income'],
+                          delta=None if pd.isna(margin) else f"{margin:.1f}% of revenue", delta_color='off'))
     if 'Diluted EPS' in table and pd.notna(last['Diluted EPS']):
-        cols[2].metric("Earnings per share", dollars(last['Diluted EPS']), help=HELP['eps'])
+        cards.append(dict(label="Earnings per share", value=dollars(last['Diluted EPS']), help=HELP['eps']))
+    layout.metric_grid(cards, width=170)
 
     chart_columns = [c for c in ('Revenue', 'Net income') if c in table]
     if chart_columns:
@@ -820,11 +824,12 @@ The **News** view has live headlines and an example of reading one both ways.
                     "(change the period with the Range control in the Price view):")
         stats = risk_summary(window['Close'])
         if stats:
-            r1, r2, r3 = st.columns(3)
-            r1.metric("Biggest fall", f"{stats['worst']:.0f}%", help=HELP['worst'])
-            r2.metric("Rise needed to recover", f"+{stats['recover']:.0f}%" if 'recover' in stats else "None",
-                      help=HELP['recover'])
-            r3.metric("Typical daily move", f"±{stats['typical']:.1f}%", help=HELP['typical'])
+            layout.metric_grid([
+                dict(label="Biggest fall", value=f"{stats['worst']:.0f}%", help=HELP['worst']),
+                dict(label="Rise needed to recover", value=f"+{stats['recover']:.0f}%" if 'recover' in stats else "None",
+                     help=HELP['recover']),
+                dict(label="Typical daily move", value=f"±{stats['typical']:.1f}%", help=HELP['typical']),
+            ], width=170)
             if 'low_date' in stats:
                 st.caption(f"The biggest fall ran from a high on {stats['peak_date'].strftime('%b %d, %Y')} to a low on "
                            f"{stats['low_date'].strftime('%b %d, %Y')}.")
