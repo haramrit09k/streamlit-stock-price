@@ -260,7 +260,7 @@ def test_fresh_calls_counter_only_counts_real_attempts(monkeypatch):
     assert ai.fresh_calls == before + 1                           # the blocked attempt was not counted
 
 
-@pytest.mark.parametrize("status, word", [(401, "ANTHROPIC_API_KEY"), (404, "AI_MODEL"), (429, "credit")])
+@pytest.mark.parametrize("status, word", [(401, "ANTHROPIC_API_KEY"), (404, "AI_MODEL"), (400, "AI_MODEL"), (429, "rate limited")])
 def test_failures_say_what_to_check(caplog, status, word):
     error = RuntimeError("boom")
     error.status_code = status
@@ -268,3 +268,49 @@ def test_failures_say_what_to_check(caplog, status, word):
         with pytest.raises(ai.AiUnavailable):
             ai.summarise("ACME", "Acme", HEADLINES, client=FakeClient(error=error))
     assert word in caplog.text and f"HTTP status {status}" in caplog.text
+
+
+def test_an_account_with_no_credit_is_called_out_as_such_not_as_a_model_problem(caplog):
+    # reported by the API as an invalid request (400), so the status alone would point at the wrong thing
+    error = RuntimeError("Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing "
+                         "to upgrade or purchase credits.")
+    error.status_code = 400
+    with caplog.at_level("WARNING", logger="stockdash.ai"):
+        with pytest.raises(ai.AiUnavailable):
+            ai.summarise("ACME", "Acme", HEADLINES, client=FakeClient(error=error))
+    assert "out of credit" in caplog.text and "Plans & Billing" in caplog.text
+    assert "check AI_MODEL" not in caplog.text
+
+
+def test_prompt_forbids_inventing_roles_and_background():
+    assert "Never describe anyone as an analyst, investor, expert, economist or strategist" in ai.SYSTEM
+    assert "only when the headline names them" in ai.SYSTEM
+    assert "Do not add background" in ai.SYSTEM
+
+
+def test_invented_roles_are_detected_only_when_no_headline_uses_the_word():
+    headlines = [("Says Gene Munster: Starlink phone is a bigger problem", "Benzinga"),
+                 ("Wall Street analysts split on Acme", "Wire")]
+    result = {"bull": [{"point": "An analyst suggests the LG deal helps.", "headlines": [1]}],
+              "bear": [{"point": "An investor says Musk could make a phone. Economists agree.", "headlines": [1]}], "unclear": ""}
+    assert ai.unsupported_roles(result, headlines) == ["economist", "investor"]   # 'analyst' is in headline 2
+
+
+def test_no_role_words_means_nothing_is_flagged():
+    result = {"bull": [{"point": "Gene Munster says a phone is coming.", "headlines": [1]}], "bear": [], "unclear": ""}
+    assert ai.unsupported_roles(result, HEADLINES) == []
+
+
+def test_an_invented_role_is_logged_but_the_summary_is_not_edited(caplog):
+    text = reply(bull=[{"point": "A strategist suggests results beat estimates.", "headlines": [1]}])
+    with caplog.at_level("WARNING", logger="stockdash.ai"):
+        out = ai.summarise("ACME", "Acme", HEADLINES, client=FakeClient(text))   # no headline uses the word 'strategist'
+    assert "strategist" in caplog.text and "forbids" in caplog.text
+    assert out["bull"][0]["point"] == "A strategist suggests results beat estimates."   # shown as the model wrote it
+
+
+def test_a_role_word_that_a_headline_uses_is_not_flagged(caplog):
+    text = reply(bull=[{"point": "An analyst raised the price target.", "headlines": [2]}])   # headline 2 says 'Analyst'
+    with caplog.at_level("WARNING", logger="stockdash.ai"):
+        ai.summarise("ACME", "Acme", HEADLINES, client=FakeClient(text))
+    assert "role the headlines don't use" not in caplog.text
