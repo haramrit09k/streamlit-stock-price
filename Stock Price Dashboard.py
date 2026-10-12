@@ -20,6 +20,15 @@ def load_history(symbol):
     return yf.Ticker(symbol).history(period='max')
 
 
+def change_text(series, symbol=None):
+    """Percent change from the first to the last value, coloured green/red (None if not enough data)."""
+    if len(series) < 2 or series.iloc[0] == 0:
+        return None
+    pct = (series.iloc[-1] / series.iloc[0] - 1) * 100
+    colour = 'green' if pct >= 0 else 'red'
+    return f"{symbol + ' ' if symbol else ''}:{colour}[{pct:+,.1f}%]"
+
+
 tickers = load_tickers()
 
 st.title("📈 Stock Price Dashboard")
@@ -108,7 +117,8 @@ if other is not None and closes.empty:
     st.warning("These two companies have no trading days in common.")
 elif other is not None:
     st.subheader(f"Growth of 100: {company['Symbol']} vs {other['Symbol']}")
-    st.caption(f"Both rebased to 100 on {closes.index[0].strftime('%B %d, %Y')}")
+    st.caption(f"Both rebased to 100 on {closes.index[0].strftime('%B %d, %Y')}. "
+               f"Change over this range: {' · '.join(change_text(closes[c], c) for c in closes)}")
     growth = (closes / closes.iloc[0] * 100).rename_axis('Date').reset_index().melt(
         'Date', var_name='Symbol', value_name='Value')
     growth_chart = alt.Chart(growth).mark_line().encode(
@@ -120,6 +130,10 @@ elif other is not None:
     st.altair_chart(growth_chart)
 else:
     st.subheader("Closing price (USD)")
+    move = change_text(view['Close'])
+    if move:
+        st.caption(f"Change over this range: {move} "
+                   f"({view.index[0].strftime('%b %d, %Y')} to {view.index[-1].strftime('%b %d, %Y')})")
     # let the y-axis fit the data instead of starting at 0, so price moves are visible
     price_chart = alt.Chart(view['Close'].reset_index()).mark_line().encode(
         x=alt.X('Date:T', title=None),
