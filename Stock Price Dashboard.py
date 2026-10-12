@@ -31,7 +31,7 @@ tickerDfToday = tickerData.history(period='1d')
 
 if tickerDfToday.empty:
     df2 = {'Open': ['No data found'], 'Close': ['No data found'], 'High': ['No data found'], 'Low': ['No data found'], 'Volume': ['No data found'], 'Dividends': ['No data found']}
-    tickerDfToday = df2
+    tickerDfToday = pd.DataFrame(df2)
     
 # st.text(tickerDfToday)
 
@@ -43,17 +43,17 @@ st.write("""
 st.write("""
 ### Today (""",d1,"""):
 - Opening Price :
-""",tickerDfToday['Open'][0], """
+""",tickerDfToday['Open'].iloc[0], """
 - Closing Price  :
-""",tickerDfToday['Close'][0], """
+""",tickerDfToday['Close'].iloc[0], """
 - High  :
-""",tickerDfToday['High'][0] , """
+""",tickerDfToday['High'].iloc[0] , """
 - Low  :
-""",tickerDfToday['Low'][0], """
+""",tickerDfToday['Low'].iloc[0], """
 - Volume  :
-""",tickerDfToday['Volume'][0] , """
+""",tickerDfToday['Volume'].iloc[0] , """
 - Dividends  :
-""",tickerDfToday['Dividends'][0])
+""",tickerDfToday['Dividends'].iloc[0])
 
 # display company details
 st.write("""
