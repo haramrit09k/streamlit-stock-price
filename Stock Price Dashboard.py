@@ -1,84 +1,78 @@
 import yfinance as yf
 import streamlit as st
 import pandas as pd
-from datetime import date
 
-# concatenate names and symbols and store in another list
-# which will be used for populating the selection box
-tickers = pd.read_csv('tickers.csv')
-symbols = tickers['Symbol'].to_list()
-names = tickers['Company Name'].to_list()
-result = list(symbols[i]+' - '+names[i] for i in range(len(names)))
+st.set_page_config(page_title="Stock Price Dashboard", page_icon="📈", layout="centered")
 
-# get today's date
-today = date.today()
-d1 = today.strftime("%A, %B %d, %Y") # YYYY-mm-dd
+RANGES = {"1M": 30, "6M": 182, "1Y": 365, "5Y": 365 * 5, "Max": None}
 
-st.write("""
-# :chart_with_upwards_trend: Stock Price Dashboard
-## [{ by haramrit singh khurana }](https://haramrit09k.github.io)
 
+@st.cache_data
+def load_tickers():
+    df = pd.read_csv('tickers.csv')
+    df['Label'] = df['Symbol'] + ' - ' + df['Company Name']
+    return df
+
+
+@st.cache_data(ttl=3600)
+def load_history(symbol):
+    return yf.Ticker(symbol).history(period='max')
+
+
+tickers = load_tickers()
+
+st.title("📈 Stock Price Dashboard")
+st.caption("by [haramrit singh khurana](https://haramrit09k.github.io)")
+
+labels = tickers['Label'].to_list()
+default = labels.index('AAPL - Apple Inc.') if 'AAPL - Apple Inc.' in labels else 0
+choice = st.selectbox('Select company', labels, index=default)
+company = tickers[tickers['Label'] == choice].iloc[0]
+
+history = load_history(company['Symbol'])
+
+st.subheader(f"{company['Symbol']} · {company['Company Name']}")
+
+if history.empty:
+    st.warning("No price data found for this company.")
+    st.stop()
+
+# latest trading day, compared with the one before it
+latest = history.iloc[-1]
+st.caption(f"Latest trading day: {history.index[-1].strftime('%A, %B %d, %Y')}")
+
+change = None
+if len(history) > 1:
+    change = latest['Close'] - history['Close'].iloc[-2]
+    change_pct = change / history['Close'].iloc[-2] * 100
+
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Close", f"${latest['Close']:,.2f}",
+            None if change is None else f"{change:+.2f} ({change_pct:+.2f}%)")
+col2.metric("Open", f"${latest['Open']:,.2f}")
+col3.metric("High", f"${latest['High']:,.2f}")
+col4.metric("Low", f"${latest['Low']:,.2f}")
+
+col5, col6 = st.columns(2)
+col5.metric("Volume", f"{latest['Volume']:,.0f}")
+col6.metric("Dividends", f"${latest['Dividends']:,.2f}")
+
+# one price chart with a time range, instead of one chart per column
+range_choice = st.radio("Range", list(RANGES), index=2, horizontal=True)
+days = RANGES[range_choice]
+view = history if days is None else history[history.index >= history.index[-1] - pd.Timedelta(days=days)]
+
+st.subheader("Closing price (USD)")
+st.line_chart(view['Close'])
+
+st.subheader("Volume")
+st.bar_chart(view['Volume'])
+
+with st.expander("Company details"):
+    st.markdown(f"""
+- **Company name:** {company['Company Name']}
+- **Symbol:** {company['Symbol']}
+- **Security name:** {company['Security Name']}
+- **Market category:** {company['Market Category']}
+- **Financial status:** {company['Financial Status']}
 """)
-
-# tickerSymbol = "GOOGL"
-# tickerSymbol = st.text_input('Enter ticker')
-tickerSymbol = st.selectbox('Select company', result)
-
-tickerData = yf.Ticker(symbols[result.index(tickerSymbol)])
-
-tickerDf = tickerData.history(period='max')
-tickerDfToday = tickerData.history(period='1d')
-
-if tickerDfToday.empty:
-    df2 = {'Open': ['No data found'], 'Close': ['No data found'], 'High': ['No data found'], 'Low': ['No data found'], 'Volume': ['No data found'], 'Dividends': ['No data found']}
-    tickerDfToday = pd.DataFrame(df2)
-    
-# st.text(tickerDfToday)
-
-st.write("""
-### """ + symbols[result.index(tickerSymbol)] + """
-#### """ + names[result.index(tickerSymbol)])
-
-# display today's prices
-st.write("""
-### Today (""",d1,"""):
-- Opening Price :
-""",tickerDfToday['Open'].iloc[0], """
-- Closing Price  :
-""",tickerDfToday['Close'].iloc[0], """
-- High  :
-""",tickerDfToday['High'].iloc[0] , """
-- Low  :
-""",tickerDfToday['Low'].iloc[0], """
-- Volume  :
-""",tickerDfToday['Volume'].iloc[0] , """
-- Dividends  :
-""",tickerDfToday['Dividends'].iloc[0])
-
-# display company details
-st.write("""
-### Details:
-- Company Name :
-""",names[result.index(tickerSymbol)], """
-- Symbol  :
-""",symbols[result.index(tickerSymbol)], """
-- Security Name  :
-""",tickers['Security Name'][result.index(tickerSymbol)] , """
-- Market Category  :
-""",tickers['Market Category'][result.index(tickerSymbol)], """
-- Test Issue  :
-""",tickers['Test Issue'][result.index(tickerSymbol)] , """
-- Financial Status  :
-""",tickers['Financial Status'][result.index(tickerSymbol)])
-
-st.line_chart(tickerDf.High)
-st.line_chart(tickerDf.Low)
-
-st.line_chart(tickerDf.Open)
-st.line_chart(tickerDf.Close)
-
-st.line_chart(tickerDf.Volume)
-st.line_chart(tickerDf.Dividends)
-
-# st.line_chart(tickerDf.Stock)
-st.line_chart(tickerDf['Stock Splits'])
